@@ -49,6 +49,8 @@ const int cols=80;
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
 #define CRSR_LEFT() write(STDOUT_FILENO, "\033[1C", 4);
 #define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1D", 4);
+#define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
+#define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
 
 /* Walk the line list to the requested line */
 static inline struct line *walk_to_line(int num)
@@ -64,8 +66,7 @@ static inline struct line *walk_to_line(int num)
 }
 
 /* Allocate a new line after the selected line */
-static struct line *new_line(unsigned int start, unsigned int len,
-		const char * restrict text)
+static struct line *new_line(unsigned int start, const char * restrict text)
 {
 	struct line *cur_line, *new_line;
 
@@ -78,10 +79,17 @@ static struct line *new_line(unsigned int start, unsigned int len,
 	/* Insert a new line */
 	new_line = (struct line *)malloc(sizeof(struct line));
 	if (!new_line) goto oom;
-	new_line->next = cur_line->next;
-	new_line->prev = cur_line;
+	if (cur_line == NULL) {
+		/* If line_head is NULL, no lines exist yet */
+		line_head = new_line;
+		new_line->next = NULL;
+		new_line->prev = NULL;
+	} else {
+		new_line->next = cur_line->next;
+		new_line->prev = cur_line;
+		cur_line->next = new_line;
+	}
 	if (new_line->next != NULL) new_line->next->prev = new_line;
-	cur_line->next = new_line;
 	/* Allocate the text area (if applicable) */
 	if (text == NULL) {
 		new_line->text = NULL;
@@ -99,10 +107,43 @@ oom:
 	exit(EXIT_FAILURE);
 }
 
+/* Destroy and free one line in the line list */
+static int destroy_line(int num)
+{
+	struct line *line;
+
+	line = walk_to_line(num);
+	if (line == NULL) return -1;
+	if (line->text != NULL) free(line->text);
+	line->prev->next = line->next;
+	free(line);
+
+	return 0;
+}
+
+static void destroy_buffer(void)
+{
+	struct line *line = line_head;
+	struct line *prev = NULL;
+
+	line_head = NULL;
+
+	/* Free lines in order until list is exhausted */
+	while (line != NULL) {
+		if (line->text != NULL) free(line->text);
+		if (line->prev != NULL) free(line->prev);
+		prev = line;
+		line = line->next;
+	}
+	/* Free the final line, if applicable */
+	if (prev != NULL) free(prev);
+}
+
 /* Restore terminal to original configuration */
 static void term_restore(void)
 {
 	if (termdesc != -1) tcsetattr(termdesc, TCSANOW, &term_orig);
+	ENABLE_LINE_WRAP();
 	return;
 }
 
@@ -160,12 +201,16 @@ static int term_init(void)
 	/* Finalize settings */
 	tcsetattr(termdesc, TCSANOW, &term_config);
 
+	/* Disable automatic line wrapping */
+	DISABLE_LINE_WRAP();
+
 	return 0;
 }
 
 
 int main(int argc, char **argv)
 {
+	struct line *cur_line;
 	int i;
 
 	if ((i = term_init()) != 0) {
@@ -175,9 +220,11 @@ int main(int argc, char **argv)
 	}
 
 	CLEAR_SCREEN();
+	cur_line = new_line(0, NULL);
 	i = getc(stdin);
 	printf("You said %c\n", i);
 
 	term_restore();
+	destroy_buffer();
 	exit(EXIT_SUCCESS);
 }
