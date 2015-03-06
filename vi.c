@@ -4,8 +4,13 @@
 #include <unistd.h>
 #include <termios.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <errno.h>
+
+/* FIXME: This is only for testing purposes. */
+static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing.";
+
 
 static void clean_abort(void);
 static void update_status(void);
@@ -23,10 +28,14 @@ static struct line *line_head = NULL;
 /* Terminal configuration data */
 static struct termios term_orig, term_config;
 static int termdesc = -1;
+static int term_rows;
+static int term_real_rows;
+static int term_cols;
+
 
 /* Current editing locations (screen and file) */
 static char crsr_x, crsr_y, cur_line, line_shift;
-char crsr_set_string[12];
+static char crsr_set_string[12];
 /* Track current line's struct pointer to avoid extra walks */
 static struct line *cur_line_s = NULL;
 
@@ -34,10 +43,12 @@ static struct line *cur_line_s = NULL;
 #define MODE_COMMAND 0
 #define MODE_INSERT 1
 #define MODE_REPLACE 2
-int vi_mode = 0;
-const char * const mode_string[] = { "", "--- INSERT ---", "--- REPLACE ---" };
+static int vi_mode = 0;
+static const char * const mode_string[] = {
+	"", "--- INSERT ---", "--- REPLACE ---"
+};
 #define MAX_STATUS 64
-char custom_status[MAX_STATUS] = "";
+static char custom_status[MAX_STATUS] = "";
 
 /* Total number of lines allocated */
 static int line_count = 0;
@@ -53,11 +64,6 @@ struct {
 	char text[TEMP_BUFSIZ];
 } temp_line;
 
-const char initial_line[] = "Now is the time for all good men to come to the aid of the party";
-const int term_rows = 24;
-const int term_real_rows = 25;
-const int term_cols = 80;
-
 /* Escape sequence function definitions */
 #define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
 #define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
@@ -66,10 +72,24 @@ const int term_cols = 80;
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
 #define CRSR_LEFT() write(STDOUT_FILENO, "\033[1D", 4);
 #define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1C", 4);
-#define CRSR_XY(a,b) { snprintf(crsr_set_string, 12, "\033[%d;%df", a, b); \
+#define CRSR_YX(a,b) { snprintf(crsr_set_string, 12, "\033[%d;%df", a, b); \
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
 #define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
 #define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
+
+/***************************************************************************/
+
+/* Read terminal dimensions */
+static void read_term_dimensions(void)
+{
+	struct winsize w;
+	ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+	term_real_rows = w.ws_row;
+	term_rows = w.ws_row - 1;
+	term_cols = w.ws_col;
+	return;
+}
+
 
 /* Invalid command warning */
 static void invalid_command(void)
@@ -178,7 +198,7 @@ static void update_status(void)
 	int top_line;
 
 	/* Move the cursor to the last line */
-	CRSR_XY(term_real_rows, 0);
+	CRSR_YX(term_real_rows, 0);
 	ERASE_LINE();
 
 	/* Print the current insert/replace mode or special status */
@@ -188,9 +208,9 @@ static void update_status(void)
 	*custom_status = '\0';
 
 	/* Print our location in the current line and file */
-	CRSR_XY(term_real_rows, term_cols - 20);
-	printf("%d,%d", cur_line, crsr_x);
-	CRSR_XY(term_real_rows, term_cols - 5);
+	CRSR_YX(term_real_rows, term_cols - 20);
+	printf("%d,%d", cur_line, crsr_x + line_shift);
+	CRSR_YX(term_real_rows, term_cols - 5);
 	top_line = cur_line - crsr_y + 1;
 	if (top_line < 1) goto error_top_line;
 	if (top_line == 1) {
@@ -203,7 +223,7 @@ static void update_status(void)
 	}
 
 	/* Put the cursor back where it was before we touched it */
-	CRSR_XY(crsr_y, crsr_x);
+	CRSR_YX(crsr_y, crsr_x);
 
 	return;
 
@@ -219,6 +239,7 @@ static void write_shifted_line(struct line *line)
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
+	CRSR_HOME();
 	ERASE_LINE();
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
@@ -285,14 +306,13 @@ static void do_del_crsr_char(void)
 	/* Copy everything down one char */
 	strncpy(p - 1, p, strlen(p));
 	cur_line_s->len--;
-	if (line_shift > 0) {
-		line_shift--;
-		return;
+	if (crsr_x > (cur_line_s->len - line_shift)) crsr_x--;
+	if (crsr_x < 1) {
+		if (line_shift > 0) line_shift--;
+		crsr_x = 1;
 	}
-	if (crsr_x > cur_line_s->len) crsr_x--;
-	if (crsr_x < 1) crsr_x = 1;
 	write_shifted_line(cur_line_s);
-	CRSR_XY(crsr_x, crsr_y);
+	CRSR_YX(crsr_y, crsr_x);
 	return;
 }
 
@@ -377,7 +397,7 @@ static void clean_abort(void)
 /* Oh dear God, NO! */
 static void oh_dear_god_no(char *string)
 {
-	strcpy(custom_status, "THIS SHOULDN'T HAPPEN");
+	strcpy(custom_status, "THIS SHOULDN'T HAPPEN: ");
 	strcat(custom_status, string);
 	update_status();
 	return;
@@ -430,7 +450,13 @@ int do_cmd(char c)
 		}
 		break;
 	case 'h':	/* left */
-		if (crsr_x == 1) break;
+		if (crsr_x == 1) {
+			if (line_shift > 0) {
+				line_shift--;
+				write_shifted_line(cur_line_s);
+				break;
+			} else break;
+		}
 		crsr_x--; CRSR_LEFT();
 		break;
 	case 'j':	/* down */
@@ -450,24 +476,25 @@ int do_cmd(char c)
 				break;
 			}
 		} else {
-			crsr_x++;
-			CRSR_RIGHT();
+			if (crsr_x < (cur_line_s->len - line_shift)) {
+				crsr_x++;
+				CRSR_RIGHT();
+			}
 		}
 		break;
 	case 'x':	/* Delete char at cursor */
 		do_del_crsr_char();
 		break;
 	case '!':	/* NON-STANDARD cursor pos dump */
-		sprintf(custom_status, "c_x %d, c_y %d",
-				crsr_x, crsr_y);
-		update_status();
+		sprintf(custom_status, "term %dx%d, c_x %d, c_y %d",
+				term_cols, term_real_rows, crsr_x, crsr_y);
 		break;
 	default:
 		snprintf(custom_status, MAX_STATUS,
 				"Unknown key %u", c);
-		update_status();
 		break;
 	}
+	update_status();
 	return 0;
 
 end_vi:
@@ -490,6 +517,7 @@ int main(int argc, char **argv)
 		clean_abort();
 	}
 
+	read_term_dimensions();
 	CLEAR_SCREEN();
 	/* Set up the first line */
 	cur_line_s = new_line(0, initial_line);
