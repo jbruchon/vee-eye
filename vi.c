@@ -7,12 +7,24 @@
 #include <sys/types.h>
 #include <errno.h>
 
+static void clean_abort(void);
+static void update_status_bar(void);
+
 /* Terminal configuration data */
 static struct termios term_orig, term_config;
 static int termdesc = -1;
 
 /* Current editing locations (screen and file) */
-static char crsr_x, crsr_y, cur_line, cur_pos;
+static char crsr_x, crsr_y, cur_line, cur_pos, line_shift;
+char crsr_set_string[12];
+
+/* Current mode: 0=command, 1=insert, 2=replace */
+#define MODE_COMMAND 0
+#define MODE_INSERT 1
+#define MODE_REPLACE 2
+int vi_mode = 0;
+const char * const mode_string[] = { "", "--- INSERT ---", "--- REPLACE ---" };
+char custom_status[64] = "";
 
 /* Total number of lines allocated */
 static int line_count = 0;
@@ -39,18 +51,30 @@ struct {
 } temp_line;
 
 const char initial_line[] = "Now is the time for all good men to come to the aid of the party";
-const int rows=25;
-const int cols=80;
+const int term_rows=25;
+const int term_cols=80;
 
 /* Escape sequence function definitions */
 #define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
 #define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
+#define CRSR_HOME() write(STDOUT_FILENO, "\033[H", 3);
 #define CRSR_UP() write(STDOUT_FILENO, "\033[1A", 4);
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
 #define CRSR_LEFT() write(STDOUT_FILENO, "\033[1C", 4);
 #define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1D", 4);
+#define CRSR_XY(a,b) { snprintf(crsr_set_string, 12, "\033[%d;%df", a, b); \
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
 #define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
 #define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
+
+/* Invalid command warning */
+static void invalid_command(void)
+{
+	strcpy(custom_status, "Invalid command");
+	update_status_bar();
+	return;
+}
+
 
 /* Walk the line list to the requested line */
 static inline struct line *walk_to_line(int num)
@@ -58,12 +82,15 @@ static inline struct line *walk_to_line(int num)
 	struct line *line = line_head;
 	int i = 0;
 
+	if (num == 0) return NULL;
 	while (line != NULL) {
+		i++;
 		if (i == num) break;
 		line = line->next;
 	}
 	return line;
 }
+
 
 /* Allocate a new line after the selected line */
 static struct line *new_line(unsigned int start, const char * restrict text)
@@ -104,7 +131,9 @@ static struct line *new_line(unsigned int start, const char * restrict text)
 	return new_line;
 oom:
 	fprintf(stderr, "out of memory\n");
-	exit(EXIT_FAILURE);
+	clean_abort();
+
+	return NULL;
 }
 
 /* Destroy and free one line in the line list */
@@ -138,6 +167,104 @@ static void destroy_buffer(void)
 	/* Free the final line, if applicable */
 	if (prev != NULL) free(prev);
 }
+
+static void update_status_bar(void)
+{
+	char num[4];
+	int top_line;
+
+	/* Move the cursor to the last line */
+	CRSR_XY(term_rows, 1);
+	/* Print the current insert/replace mode or special status */
+	if (*custom_status != '\0') {
+		printf("%s", mode_string[vi_mode]);
+	} else {
+		printf("%s", custom_status);
+		*custom_status = '\0';
+	}
+
+	/* Print our location in the current line and file */
+	CRSR_XY(term_rows, term_cols - 20);
+	printf("%d,%d", cur_line, cur_pos);
+	CRSR_XY(term_rows, term_cols - 4);
+	top_line = cur_line - crsr_y + 1;
+	if (top_line < 1) goto error_top_line;
+	if (top_line == 1) {
+		write(STDOUT_FILENO, " Top", 4);
+	} else if ((cur_line + term_rows) >= line_count) {
+		write(STDOUT_FILENO, " Bot", 4);
+	} else {
+		snprintf(num, 4, "%d%%", (line_count * 100) / top_line);
+		write(STDOUT_FILENO, num, strlen(num));
+	}
+
+	return;
+
+error_top_line:
+	fprintf(stderr, "error: top line is invalid (%d)\n", top_line);
+	clean_abort();
+}
+
+
+/* Write a line to the screen with appropriate shift */
+static void write_shifted_line(struct line *line)
+{
+	char *p = line->text + line_shift;
+	int len = line->len - line_shift;
+
+	if (len > term_cols) len = term_cols;
+	write(STDOUT_FILENO, p, len);
+	write(STDOUT_FILENO, "\n", 1);
+	return;
+}
+
+
+/* Redraw the entire screen */
+static void redraw_screen(void)
+{
+	struct line *line;
+	int start_y, start_x;
+	int remain_row;
+
+	CLEAR_SCREEN();
+
+	/* Get start line number and pointer */
+	if (cur_line < crsr_y) goto error_line_cursor;
+	start_y = cur_line - crsr_y + 1;
+
+	/* Find the first line to write to the screen */
+	line = walk_to_line(start_y);
+	if (!line) goto error_line_walk;
+
+	/* Draw lines until no more are left */
+	remain_row = term_rows - 1;
+	while (remain_row) {
+		/* Write out this line data */
+		write_shifted_line(line);
+		line = line->next;
+		remain_row--;
+		if (line == NULL) break;
+	}
+
+	/* Fill the rest of the screen with tildes */
+	while (remain_row) {
+		write(STDOUT_FILENO, "~\n", 2);
+		remain_row--;
+	}
+
+	update_status_bar();
+	CRSR_HOME();
+
+	return;
+
+error_line_cursor:
+	fprintf(stderr, "error: cur_line < crsr_y\n");
+	clean_abort();
+error_line_walk:
+	fprintf(stderr, "error: line walk invalid (%d) (%d - %d)\n",
+			start_y, cur_line, crsr_y);
+}
+
 
 /* Restore terminal to original configuration */
 static void term_restore(void)
@@ -207,23 +334,54 @@ static int term_init(void)
 	return 0;
 }
 
+/* Clean abort */
+static void clean_abort(void)
+{
+	term_restore();
+	destroy_buffer();
+	exit(EXIT_FAILURE);
+}
+
 
 int main(int argc, char **argv)
 {
-	struct line *cur_line;
+	struct line *line;
 	int i;
 
+	line_shift = 0;
 	if ((i = term_init()) != 0) {
 		if (i == -ENOTTY) fprintf(stderr, "tty is required\n");
 		else fprintf(stderr, "cannot init terminal: %s\n", strerror(-i));
-		exit(EXIT_FAILURE);
+		clean_abort();
 	}
 
 	CLEAR_SCREEN();
-	cur_line = new_line(0, NULL);
-	i = getc(stdin);
-	printf("You said %c\n", i);
+	/* Set up the first line */
+	line = new_line(0, initial_line);
+	crsr_x = 1; crsr_y = 1;
+	cur_line = 1; cur_pos = 1;
+	redraw_screen();
+	while (i = getc(stdin)) {
+		switch (i) {
+		case 'q':
+			goto end_vi;
+			break;
+		case 'i':
+			vi_mode = MODE_INSERT;
+			break;
+		case ':':
+			i = getc(stdin);
+			switch (i) {
+			default:
+				invalid_command();
+				break;
+			}
+			break;
+		}
+	}
 
+end_vi:
+	CLEAR_SCREEN();
 	term_restore();
 	destroy_buffer();
 	exit(EXIT_SUCCESS);
