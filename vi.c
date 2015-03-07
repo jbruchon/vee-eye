@@ -89,14 +89,22 @@ static int line_count = 0;
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
 #define CRSR_LEFT() write(STDOUT_FILENO, "\033[1D", 4);
 #define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1C", 4);
-#define CRSR_RESTORE() { sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x); \
-	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
-#define CRSR_YX(a,b) { sprintf(crsr_set_string, "\033[%d;%df", a, b); \
-	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
 #define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
 #define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
 
 /***************************************************************************/
+
+/* Cursor control functions */
+void crsr_restore(void)
+{
+	sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x);
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
+}
+void crsr_yx(int row, int col)
+{
+	sprintf(crsr_set_string, "\033[%d;%df", row, col);
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
+}
 
 #ifndef NO_SIGNALS
 /* Window size change handler */
@@ -270,7 +278,7 @@ static void update_status(void)
 	int top_line;
 
 	/* Move the cursor to the last line */
-	CRSR_YX(term_real_rows, 0);
+	crsr_yx(term_real_rows, 0);
 	ERASE_LINE();
 
 	/* Print the current insert/replace mode or special status */
@@ -280,9 +288,9 @@ static void update_status(void)
 	*custom_status = '\0';
 
 	/* Print our location in the current line and file */
-	CRSR_YX(term_real_rows, term_cols - 20);
+	crsr_yx(term_real_rows, term_cols - 20);
 	printf("%d,%d", cur_line, crsr_x + line_shift);
-	CRSR_YX(term_real_rows, term_cols - 5);
+	crsr_yx(term_real_rows, term_cols - 5);
 	top_line = 1 + (cur_line - crsr_y);
 	if (top_line < 1) goto error_top_line;
 	if (top_line == 1) {
@@ -295,7 +303,7 @@ static void update_status(void)
 	}
 
 	/* Put the cursor back where it was before we touched it */
-	CRSR_RESTORE();
+	crsr_restore();
 
 	return;
 
@@ -386,7 +394,7 @@ static void do_del_under_crsr(void)
 		crsr_x = 1;
 	}
 	write_shifted_line(cur_line_s, crsr_y);
-	CRSR_RESTORE();
+	crsr_restore();
 	return;
 }
 
@@ -558,7 +566,7 @@ void edit_mode(void)
 		/* Insert character at cursor position */
 		insert_char(c);
 		write_shifted_line(cur_line_s, crsr_y);
-		CRSR_RESTORE();
+		crsr_restore();
 	}
 	return;
 }
@@ -709,7 +717,7 @@ int do_cmd(char c)
 				cur_line_s->len, cur_line_s->alloc_size);
 		break;
 	case ':':	/* Colon command */
-		CRSR_YX(term_real_rows, 1);
+		crsr_yx(term_real_rows, 1);
 		ERASE_LINE();
 		write(STDOUT_FILENO, ":", 1);
 		if (!get_command_string(command)) break;
@@ -719,12 +727,12 @@ int do_cmd(char c)
 		sprintf(custom_status, "Unknown key %u", c);
 		break;
 	}
-	CRSR_RESTORE();
+	crsr_restore();
 	update_status();
 	return 0;
 
 end_vi:
-	CRSR_YX(term_real_rows, 1);
+	crsr_yx(term_real_rows, 1);
 	ERASE_LINE();
 	term_restore();
 	destroy_buffer();
