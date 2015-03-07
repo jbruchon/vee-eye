@@ -57,7 +57,7 @@ static int term_cols;
 
 
 /* Current editing locations (screen and file) */
-static char crsr_x, crsr_y, cur_line, line_shift;
+static int crsr_x, crsr_y, cur_line, line_shift;
 static char crsr_set_string[12];
 /* Track current line's struct pointer to avoid extra walks */
 static struct line *cur_line_s = NULL;
@@ -172,27 +172,27 @@ static inline struct line *walk_to_line(int num)
 static struct line *alloc_new_line(int start,
 		const char * const restrict new_text)
 {
-	struct line *cur_line, *new_line;
+	struct line *prev_line, *new_line;
 
 	/* Cannot open lines out of current range */
 	if (start > line_count) return NULL;
 
-	if (start > 0) cur_line = walk_to_line(start);
-	else cur_line = line_head;
+	if (start > 0) prev_line = walk_to_line(start);
+	else prev_line = line_head;
 
 	/* Insert a new line */
 	new_line = (struct line *)malloc(sizeof(struct line));
 	if (!new_line) goto oom;
-	if (cur_line == NULL) {
+	if (prev_line == NULL) {
 		/* If line_head is NULL, no lines exist yet */
 		line_head = new_line;
 		new_line->next = NULL;
 		new_line->prev = NULL;
 	} else {
 		/* Insert this line after the existing one */
-		new_line->next = cur_line->next;
-		new_line->prev = cur_line;
-		cur_line->next = new_line;
+		new_line->next = prev_line->next;
+		new_line->prev = prev_line;
+		prev_line->next = new_line;
 	}
 
 	/* If inserting between two lines, link the next one to us */
@@ -272,7 +272,7 @@ static void update_status(void)
 	CRSR_YX(term_real_rows, term_cols - 20);
 	printf("%d,%d", cur_line, crsr_x + line_shift);
 	CRSR_YX(term_real_rows, term_cols - 5);
-	top_line = cur_line - crsr_y + 1;
+	top_line = 1 + (cur_line - crsr_y);
 	if (top_line < 1) goto error_top_line;
 	if (top_line == 1) {
 		write(STDOUT_FILENO, " Top", 4);
@@ -289,7 +289,7 @@ static void update_status(void)
 	return;
 
 error_top_line:
-	fprintf(stderr, "error: top line is invalid (%d)\n", top_line);
+	fprintf(stderr, "error: top line is invalid (%d, %d, %d)\n", top_line, cur_line, crsr_y);
 	clean_abort();
 }
 
@@ -300,8 +300,9 @@ static void write_shifted_line(struct line *line, int y)
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
-	sprintf(crsr_set_string, "\033[%d;1", y);
 	ERASE_LINE();
+	sprintf(crsr_set_string, "\033[%d;1f", y);
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
 	write(STDOUT_FILENO, "\n", 1);
@@ -532,6 +533,73 @@ static int get_command_string(char *command)
 	return cmdsize;
 }
 
+
+static void do_cursor_left(void)
+{
+	if (crsr_x == 1) {
+		if (line_shift > 0) {
+			line_shift_reduce(1);
+			write_shifted_line(cur_line_s, crsr_y);
+		}
+		return;
+	}
+	crsr_x--; CRSR_LEFT();
+	return;
+}
+
+static void do_cursor_right(void)
+{
+	if (crsr_x == cur_line_s->len) return;
+	if (crsr_x == term_cols) {
+		if ((cur_line_s->len - line_shift) > term_cols) {
+			line_shift_increase(1);
+			write_shifted_line(cur_line_s, crsr_y);
+		} else {
+			oh_dear_god_no("cmd: l: term_cols check");
+			return;
+		}
+	} else {
+		if (crsr_x < (cur_line_s->len - line_shift)) {
+			crsr_x++;
+			CRSR_RIGHT();
+		}
+	}
+	return;
+}
+
+
+static void do_cursor_up(void)
+{
+	if (cur_line == 1) return;
+	if (cur_line_s->prev == NULL) return;
+	cur_line_s = cur_line_s->prev;
+	if (crsr_x > cur_line_s->len) {
+		crsr_x = cur_line_s->len;
+		if (crsr_x == 0) crsr_x = 1;
+	}
+	crsr_y--;
+	cur_line--;
+
+	return;
+}
+
+
+static void do_cursor_down(void)
+{
+	if (cur_line == line_count) return;
+	if (cur_line_s->next == NULL) return;
+	cur_line_s = cur_line_s->next;
+	if (crsr_x > cur_line_s->len) {
+		crsr_x = cur_line_s->len;
+		if (crsr_x == 0) crsr_x = 1;
+	}
+	crsr_y++;
+	cur_line++;
+
+	return;
+}
+
+
 /* Handle an incoming command */
 int do_cmd(char c)
 {
@@ -547,37 +615,16 @@ int do_cmd(char c)
 		edit_mode();
 		break;
 	case 'h':	/* left */
-		if (crsr_x == 1) {
-			if (line_shift > 0) {
-				line_shift_reduce(1);
-				write_shifted_line(cur_line_s, crsr_y);
-				break;
-			} else break;
-		}
-		crsr_x--; CRSR_LEFT();
+		do_cursor_left();
 		break;
 	case 'j':	/* down */
-		//do_cursor_down();
+		do_cursor_down();
 		break;
 	case 'k':	/* up */
-		//do_cursor_up();
+		do_cursor_up();
 		break;
 	case 'l':	/* right */
-		if (crsr_x == cur_line_s->len) break;
-		if (crsr_x == term_cols) {
-			if ((cur_line_s->len - line_shift) > term_cols) {
-				line_shift_increase(1);
-				write_shifted_line(cur_line_s, crsr_y);
-			} else {
-				oh_dear_god_no("cmd: l: term_cols check");
-				break;
-			}
-		} else {
-			if (crsr_x < (cur_line_s->len - line_shift)) {
-				crsr_x++;
-				CRSR_RIGHT();
-			}
-		}
+		do_cursor_right();
 		break;
 	case 'x':	/* Delete char at cursor */
 		do_del_crsr_char();
@@ -591,7 +638,6 @@ int do_cmd(char c)
 		write(STDOUT_FILENO, ":", 1);
 		if (!get_command_string(command)) break;
 		if (strcmp(command, "q") == 0) goto end_vi;
-
 		break;
 	default:
 		sprintf(custom_status, "Unknown key %u", c);
