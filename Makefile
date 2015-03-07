@@ -17,6 +17,10 @@ OBJS=vi.o
 
 all: vi manual
 
+elks:
+	rm vi
+	bcc -ansi -0 -O -DNO_SIGNALS -Drestrict="" -Dinline="" -o vi vi.c
+
 vi: $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) $(BUILD_CFLAGS) -o vi $(OBJS)
 
