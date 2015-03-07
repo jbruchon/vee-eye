@@ -62,7 +62,8 @@ static int term_cols;
 
 /* Current editing locations (screen and file) */
 static int crsr_x, crsr_y, cur_line, line_shift;
-static char crsr_set_string[12];
+#define MAX_CRSR_SETSTRING 16
+static char crsr_set_string[MAX_CRSR_SETSTRING];
 /* Track current line's struct pointer to avoid extra walks */
 static struct line *cur_line_s = NULL;
 
@@ -100,12 +101,12 @@ static int line_count = 0;
 /* Cursor control functions */
 void crsr_restore(void)
 {
-	sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x);
+	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", crsr_y, crsr_x);
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 void crsr_yx(int row, int col)
 {
-	sprintf(crsr_set_string, "\033[%d;%df", row, col);
+	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", row, col);
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
@@ -142,7 +143,7 @@ static void read_term_dimensions(void)
 /* Invalid command warning */
 static void invalid_command(void)
 {
-	strcpy(custom_status, "Invalid command");
+	strncpy(custom_status, "Invalid command", MAX_STATUS);
 	update_status();
 	return;
 }
@@ -287,7 +288,7 @@ static void update_status(void)
 
 	/* Print the current insert/replace mode or special status */
 	if (*custom_status == '\0')
-		strcpy(custom_status, mode_string[vi_mode]);
+		strncpy(custom_status, mode_string[vi_mode], MAX_STATUS);
 	write(STDOUT_FILENO, custom_status, strlen(custom_status));
 	*custom_status = '\0';
 
@@ -302,7 +303,7 @@ static void update_status(void)
 	} else if ((cur_line + term_rows) >= line_count) {
 		write(STDOUT_FILENO, " Bot", 4);
 	} else {
-		sprintf(num, "%d%%", (line_count * 100) / top_line);
+		snprintf(num, 4, "%d%%", (line_count * 100) / top_line);
 		write(STDOUT_FILENO, num, strlen(num));
 	}
 
@@ -323,7 +324,7 @@ static void redraw_line(struct line *line, int y)
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
-	sprintf(crsr_set_string, "\033[%d;1f", y);
+	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
@@ -496,8 +497,8 @@ static void clean_abort(void)
 /* Oh dear God, NO! */
 static void oh_dear_god_no(char *string)
 {
-	strcpy(custom_status, "THIS SHOULDN'T HAPPEN: ");
-	strcat(custom_status, string);
+	strncpy(custom_status, "THIS SHOULDN'T HAPPEN: ", MAX_STATUS);
+	strncat(custom_status, string, MAX_STATUS);
 	update_status();
 	return;
 }
@@ -583,7 +584,7 @@ void edit_mode(void)
 
 		/* Catch any invalid characters */
 		if (c < 32 || c > 127) {
-			sprintf(custom_status, "Invalid char entered: %u", c);
+			snprintf(custom_status, MAX_STATUS, "Invalid char entered: %u", c);
 			update_status();
 			continue;
 		}
@@ -746,9 +747,11 @@ int do_cmd(char c)
 		break;
 	case '!':	/* NON-STANDARD cursor pos dump */
 		redraw_screen();
-		sprintf(custom_status, "%dx%d, cx %d, cy %d, lin %d, cur %d, cll %d, cas %d",
-				term_cols, term_real_rows, crsr_x, crsr_y, line_count, cur_line,
-				cur_line_s->len, cur_line_s->alloc_size);
+		snprintf(custom_status, MAX_STATUS,
+				"%dx%d, cx %d, cy %d, lin %d, cur %d, cll %d, cas %d",
+				term_cols, term_real_rows, crsr_x, crsr_y,
+				line_count, cur_line, cur_line_s->len,
+				cur_line_s->alloc_size);
 		break;
 	case ':':	/* Colon command */
 		crsr_yx(term_real_rows, 1);
@@ -758,7 +761,7 @@ int do_cmd(char c)
 		if (strcmp(command, "q") == 0) goto end_vi;
 		break;
 	default:
-		sprintf(custom_status, "Unknown key %u", c);
+		snprintf(custom_status, MAX_STATUS, "Unknown key %u", c);
 		break;
 	}
 	crsr_restore();
