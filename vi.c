@@ -1,19 +1,24 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <termios.h>
-#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
-#include <errno.h>
 
 /* FIXME: This is only for testing purposes. */
-static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing.";
+static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing. BLAH BLAH BLAH!";
 
 
+/* Function prototypes */
+static void read_term_dimensions(void);
 static void clean_abort(void);
 static void update_status(void);
+static void redraw_screen(void);
+
 
 /* Text is stored line-by-line. Line lengths are stored with the text data
  * to avoid lots of strlen() calls for line wrapping, insertion, etc. */
@@ -39,6 +44,9 @@ static char crsr_set_string[12];
 /* Track current line's struct pointer to avoid extra walks */
 static struct line *cur_line_s = NULL;
 
+/* Maximum size of command mode commands */
+#define MAX_CMDSIZE 128
+
 /* Current mode: 0=command, 1=insert, 2=replace */
 #define MODE_COMMAND 0
 #define MODE_INSERT 1
@@ -53,17 +61,6 @@ static char custom_status[MAX_STATUS] = "";
 /* Total number of lines allocated */
 static int line_count = 0;
 
-/* When a line is being edited, store the edits in a temporary buffer.
- * Backspace/delete operations will have a negative length. This buffer
- * is committed on cursor movement, leaving edit mode, or hitting the
- * end of the temporary buffer. */
-#define TEMP_BUFSIZ 128
-struct {
-	int insert_pos;
-	int len;
-	char text[TEMP_BUFSIZ];
-} temp_line;
-
 /* Escape sequence function definitions */
 #define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
 #define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
@@ -72,12 +69,24 @@ struct {
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
 #define CRSR_LEFT() write(STDOUT_FILENO, "\033[1D", 4);
 #define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1C", 4);
-#define CRSR_YX(a,b) { snprintf(crsr_set_string, 12, "\033[%d;%df", a, b); \
+#define CRSR_RESTORE() { sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x); \
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
+#define CRSR_YX(a,b) { sprintf(crsr_set_string, "\033[%d;%df", a, b); \
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string)); }
 #define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
 #define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
 
 /***************************************************************************/
+
+/* Window size change handler */
+void sigwinch_handler(int signum, siginfo_t *sig, void *context)
+{
+	fprintf(stderr, "Got a WINCH\n");
+	read_term_dimensions();
+	redraw_screen();
+	return;
+}
+
 
 /* Read terminal dimensions */
 static void read_term_dimensions(void)
@@ -87,6 +96,12 @@ static void read_term_dimensions(void)
 	term_real_rows = w.ws_row;
 	term_rows = w.ws_row - 1;
 	term_cols = w.ws_col;
+
+	/* Prevent dimensions from being too small */
+	if (term_real_rows < 1) term_real_rows = 1;
+	if (term_rows < 1) term_rows = 1;
+	if (term_cols < 1) term_cols = 1;
+
 	return;
 }
 
@@ -100,24 +115,44 @@ static void invalid_command(void)
 }
 
 
+/* Reduce line shift and redraw entire screen */
+static void line_shift_reduce(int count)
+{
+	if (count >= line_shift) line_shift = 0;
+	else line_shift -= count;
+	redraw_screen();
+	return;
+}
+
+
+/* Increase line shift and redraw entire screen */
+static void line_shift_increase(int count)
+{
+	line_shift += count;
+	redraw_screen();
+	return;
+}
+
+
 /* Walk the line list to the requested line */
 static inline struct line *walk_to_line(int num)
 {
 	struct line *line = line_head;
-	int i = 0;
+	int i = 1;
 
 	if (num == 0) return NULL;
 	while (line != NULL) {
-		i++;
 		if (i == num) break;
 		line = line->next;
+		i++;
 	}
 	return line;
 }
 
 
 /* Allocate a new line after the selected line */
-static struct line *new_line(unsigned int start, const char * restrict text)
+static struct line *alloc_new_line(int start,
+		const char * const restrict new_text)
 {
 	struct line *cur_line, *new_line;
 
@@ -136,21 +171,29 @@ static struct line *new_line(unsigned int start, const char * restrict text)
 		new_line->next = NULL;
 		new_line->prev = NULL;
 	} else {
+		/* Insert this line after the existing one */
 		new_line->next = cur_line->next;
 		new_line->prev = cur_line;
 		cur_line->next = new_line;
 	}
+
+	/* If inserting between two lines, link the next one to us */
 	if (new_line->next != NULL) new_line->next->prev = new_line;
+
 	/* Allocate the text area (if applicable) */
-	if (text == NULL) {
-		new_line->text = NULL;
+	if (new_text == NULL) {
 		new_line->len = 0;
+		new_line->text = (char *)malloc(1);
+		if (!new_line->text) goto oom;
+		*(new_line->text) = '\0';
 	} else {
-		new_line->len = strlen(text);
+		new_line->len = strlen(new_text);
 		new_line->text = (char *)malloc(new_line->len + 1);
 		if (!new_line->text) goto oom;
-		strncpy(new_line->text, text, new_line->len);
+		strncpy(new_line->text, new_text, new_line->len);
 	}
+
+	line_count++;
 
 	return new_line;
 oom:
@@ -218,12 +261,12 @@ static void update_status(void)
 	} else if ((cur_line + term_rows) >= line_count) {
 		write(STDOUT_FILENO, " Bot", 4);
 	} else {
-		snprintf(num, 4, "%d%%", (line_count * 100) / top_line);
+		sprintf(num, "%d%%", (line_count * 100) / top_line);
 		write(STDOUT_FILENO, num, strlen(num));
 	}
 
 	/* Put the cursor back where it was before we touched it */
-	CRSR_YX(crsr_y, crsr_x);
+	CRSR_RESTORE();
 
 	return;
 
@@ -234,12 +277,12 @@ error_top_line:
 
 
 /* Write a line to the screen with appropriate shift */
-static void write_shifted_line(struct line *line)
+static void write_shifted_line(struct line *line, int y)
 {
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
-	CRSR_HOME();
+	sprintf(crsr_set_string, "\033[%d;1", y);
 	ERASE_LINE();
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
@@ -252,26 +295,27 @@ static void write_shifted_line(struct line *line)
 static void redraw_screen(void)
 {
 	struct line *line;
-	int start_y, start_x;
+	int start_y;
 	int remain_row;
 
 	CLEAR_SCREEN();
 
 	/* Get start line number and pointer */
 	if (cur_line < crsr_y) goto error_line_cursor;
-	start_y = cur_line - crsr_y + 1;
+	start_y = cur_line + 1 - crsr_y;
 
 	/* Find the first line to write to the screen */
 	line = walk_to_line(start_y);
 	if (!line) goto error_line_walk;
 
 	/* Draw lines until no more are left */
-	remain_row = term_rows - 1;
+	remain_row = term_rows;
 	while (remain_row) {
 		/* Write out this line data */
-		write_shifted_line(line);
-		line = line->next;
+		write_shifted_line(line, (term_rows - remain_row + 1));
+//		CRSR_DOWN();
 		remain_row--;
+		line = line->next;
 		if (line == NULL) break;
 	}
 
@@ -308,11 +352,11 @@ static void do_del_crsr_char(void)
 	cur_line_s->len--;
 	if (crsr_x > (cur_line_s->len - line_shift)) crsr_x--;
 	if (crsr_x < 1) {
-		if (line_shift > 0) line_shift--;
+		if (line_shift > 0) line_shift_reduce(1);
 		crsr_x = 1;
 	}
-	write_shifted_line(cur_line_s);
-	CRSR_YX(crsr_y, crsr_x);
+	write_shifted_line(cur_line_s, crsr_y);
+	CRSR_RESTORE();
 	return;
 }
 
@@ -409,16 +453,23 @@ void edit_mode(void)
 {
 	char c;
 	while (read(STDIN_FILENO, &c, 1)) {
-		if (c == '\033') {
+		switch (c) {
+		case 0:
+			continue;
+
+		case '\033':
 			/* FIXME: poll for ESC sequences */
 			vi_mode = MODE_COMMAND;
 			update_status();
 			return;
+
+		default:
+			break;
 		}
 
 		/* Catch any invalid characters */
 		if (c < 32 || c > 127) {
-			strcpy(custom_status, "Invalid char entered\n");
+			sprintf(custom_status, "Invalid char entered: %u", c);
 			update_status();
 			continue;
 		}
@@ -429,9 +480,45 @@ void edit_mode(void)
 }
 
 
+/* Get a free-form command string from the user */
+static int get_command_string(char *command)
+{
+	int cmdsize = 0;
+	char cc;
+
+	while (read(STDIN_FILENO, &cc, 1)) {
+		/* If user presses ESC, abort */
+		if (cc == '\033') {
+			command[0] = '\0';
+			return 0;
+		}
+
+		/* Backspace */
+		if (cc == '\b') {
+			cmdsize--;
+			if (cmdsize < 0) return 0;
+			write(STDOUT_FILENO, "\b \b", 2);
+			continue;
+		}
+
+		/* Newline or carriage return */
+		if (cc == '\n' || cc == '\r') {
+			command[cmdsize] = '\0';
+			break;
+		}
+		write(STDOUT_FILENO, &cc, 1);
+		command[cmdsize] = cc;
+		cmdsize++;
+		if (cmdsize == MAX_CMDSIZE) break;
+	}
+	return cmdsize;
+}
+
 /* Handle an incoming command */
 int do_cmd(char c)
 {
+	char command[MAX_CMDSIZE];
+
 	switch (c) {
 	case 'q':
 		goto end_vi;
@@ -441,19 +528,11 @@ int do_cmd(char c)
 		update_status();
 		edit_mode();
 		break;
-	case ':':
-		c = getc(stdin);
-		switch (c) {
-		default:
-			invalid_command();
-			break;
-		}
-		break;
 	case 'h':	/* left */
 		if (crsr_x == 1) {
 			if (line_shift > 0) {
-				line_shift--;
-				write_shifted_line(cur_line_s);
+				line_shift_reduce(1);
+				write_shifted_line(cur_line_s, crsr_y);
 				break;
 			} else break;
 		}
@@ -469,8 +548,8 @@ int do_cmd(char c)
 		if (crsr_x == cur_line_s->len) break;
 		if (crsr_x == term_cols) {
 			if ((cur_line_s->len - line_shift) > term_cols) {
-				line_shift++;
-				write_shifted_line(cur_line_s);
+				line_shift_increase(1);
+				write_shifted_line(cur_line_s, crsr_y);
 			} else {
 				oh_dear_god_no("cmd: l: term_cols check");
 				break;
@@ -486,19 +565,27 @@ int do_cmd(char c)
 		do_del_crsr_char();
 		break;
 	case '!':	/* NON-STANDARD cursor pos dump */
-		sprintf(custom_status, "term %dx%d, c_x %d, c_y %d",
-				term_cols, term_real_rows, crsr_x, crsr_y);
+		sprintf(custom_status, "term %dx%d, c_x %d, c_y %d, lines %d, cur %d",
+				term_cols, term_real_rows, crsr_x, crsr_y, line_count, cur_line);
+		break;
+	case ':':	/* Colon command */
+		CRSR_YX(term_real_rows, 1);
+		write(STDOUT_FILENO, ":", 1);
+		if (!get_command_string(command)) break;
+		if (strcmp(command, "q") == 0) goto end_vi;
+
 		break;
 	default:
-		snprintf(custom_status, MAX_STATUS,
-				"Unknown key %u", c);
+		sprintf(custom_status, "Unknown key %u", c);
 		break;
 	}
+	CRSR_RESTORE();
 	update_status();
 	return 0;
 
 end_vi:
-	CLEAR_SCREEN();
+	CRSR_YX(term_real_rows, 1);
+	ERASE_LINE();
 	term_restore();
 	destroy_buffer();
 	exit(EXIT_SUCCESS);
@@ -509,6 +596,14 @@ int main(int argc, char **argv)
 {
 	int i;
 	char c;
+	struct sigaction act;
+
+	/* Set up SIGWINCH handler for window resizing support */
+	memset(&act, 0, sizeof(struct sigaction));
+	sigemptyset(&act.sa_mask);
+	act.sa_sigaction = sigwinch_handler;
+	act.sa_flags = SA_SIGINFO;
+	sigaction(SIGWINCH, &act, NULL);
 
 	line_shift = 0;
 	if ((i = term_init()) != 0) {
@@ -519,10 +614,20 @@ int main(int argc, char **argv)
 
 	read_term_dimensions();
 	CLEAR_SCREEN();
-	/* Set up the first line */
-	cur_line_s = new_line(0, initial_line);
+
+	/* Set up the testing line(s) */
+	cur_line_s = alloc_new_line(line_count, initial_line);
+	if (!cur_line_s) {
+		fprintf(stderr, "Cannot create initial line\n");
+		clean_abort();
+	}
+	if (!alloc_new_line(line_count, "test")) {
+		fprintf(stderr, "Cannot create second line\n");
+		clean_abort();
+	}
+
 	crsr_x = 1; crsr_y = 1;
-	cur_line = 1; /* crsr_x doubles as current position */
+	cur_line = 1;
 	redraw_screen();
 	/* Read commands forever */
 	while (read(STDIN_FILENO, &c, 1)) do_cmd(c);
