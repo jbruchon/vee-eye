@@ -39,7 +39,10 @@ static void redraw_screen(void);
 
 
 /* Text is stored line-by-line. Line lengths are stored with the text data
- * to avoid lots of strlen() calls for line wrapping, insertion, etc. */
+ * to avoid lots of strlen() calls for line wrapping, insertion, etc.
+ * alloc_size is the total allocated size of the text[] element. This
+ * program always allocates more space than is required for each line so
+ * that subsequent edit operations minimize allocations. */
 struct line {
 	struct line *prev;
 	struct line *next;
@@ -185,6 +188,7 @@ static struct line *alloc_new_line(int start,
 		const char * const restrict new_text)
 {
 	struct line *prev_line, *new_line;
+	int new_ll;
 
 	/* Cannot open lines out of current range */
 	if (start > line_count) return NULL;
@@ -213,19 +217,19 @@ static struct line *alloc_new_line(int start,
 	/* Allocate the text area (if applicable) */
 	if (new_text == NULL) {
 		new_line->len = 0;
-		new_line->text = (char *)malloc(term_cols + 1);
+		new_line->text = (char *)malloc(32);
 		if (!new_line->text) goto oom;
 		*(new_line->text) = '\0';
-		new_line->alloc_size = term_cols + 1;
+		new_line->alloc_size = 32;
 	} else {
 		new_line->len = strlen(new_text);
-		if (new_line->len < term_cols + 1) {
-			new_line->alloc_size = term_cols + 1;
-			new_line->text = (char *)malloc(term_cols + 1);
-		} else {
-			new_line->alloc_size = new_line->len + 1;
-			new_line->text = (char *)malloc(new_line->len + 1);
-		}
+		/* Allocate in 32-byte chunks: add null terminator room then
+		 * shift-divide; increment and shift-multiply to get the
+		 * number of bytes we need to allocate. */
+		new_ll = ((new_line->len + 1) >> 5) + 1;
+		new_ll <<= 5;
+		new_line->alloc_size = new_ll;
+		new_line->text = (char *)malloc(new_ll);
 		if (!new_line->text) goto oom;
 		strncpy(new_line->text, new_text, new_line->len);
 	}
@@ -314,7 +318,7 @@ error_top_line:
 
 
 /* Write a line to the screen with appropriate shift */
-static void write_shifted_line(struct line *line, int y)
+static void redraw_line(struct line *line, int y)
 {
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
@@ -350,7 +354,7 @@ static void redraw_screen(void)
 	remain_row = term_rows;
 	while (remain_row) {
 		/* Write out this line data */
-		write_shifted_line(line, (term_rows - remain_row + 1));
+		redraw_line(line, (term_rows - remain_row + 1));
 //		CRSR_DOWN();
 		remain_row--;
 		line = line->next;
@@ -386,14 +390,27 @@ static void do_del_under_crsr(void)
 	p = cur_line_s->text + crsr_x + line_shift;
 
 	/* Copy everything down one char */
-	strncpy(p - 1, p, strlen(p));
+	memmove(p - 1, p, strlen(p) + 1);
 	cur_line_s->len--;
 	if (crsr_x > (cur_line_s->len - line_shift)) crsr_x--;
 	if (crsr_x < 1) {
 		if (line_shift > 0) line_shift_reduce(1);
 		crsr_x = 1;
 	}
-	write_shifted_line(cur_line_s, crsr_y);
+	redraw_line(cur_line_s, crsr_y);
+	crsr_restore();
+	return;
+}
+
+
+static void go_to_start_of_next_line(void)
+{
+	cur_line++;
+	line_shift = 0;
+	crsr_x = 1;
+	/* Handle scrolling */
+	if (crsr_y < term_rows) crsr_y++;
+	redraw_screen();
 	crsr_restore();
 	return;
 }
@@ -504,7 +521,10 @@ void insert_char(char c)
 		p = cur_line_s->text + crsr_x + line_shift - 1;
 		memmove(p + 1, p, strlen(p) + 1);
 		*p = c;
-		crsr_x++;
+		if (crsr_x > term_cols) {
+			line_shift++;
+			redraw_screen();
+		} else crsr_x++;
 		cur_line_s->len++;
 		return;
 
@@ -524,6 +544,8 @@ oom:
 void edit_mode(void)
 {
 	char c;
+	char *fragment;
+
 	while (read(STDIN_FILENO, &c, 1)) {
 		switch (c) {
 		case '\0':
@@ -539,19 +561,21 @@ void edit_mode(void)
 			continue;
 
 		case '\n':
-		case '\r':
-			cur_line_s = alloc_new_line(cur_line, NULL);
-			cur_line++;
-			crsr_y++;
-			crsr_x = 1;
+		case '\r':	/* New line */
+			fragment = cur_line_s->text + line_shift + crsr_x - 1;
+
+			cur_line_s = alloc_new_line(cur_line, fragment);
+			/* New lines need to break the old line apart */
+			if (*fragment != '\0') {
+				cur_line_s->prev->len = line_shift + crsr_x - 1;
+				*fragment = '\0';
+			}
+			go_to_start_of_next_line();
 			continue;
 
 		case '\033':
 			/* FIXME: poll for ESC sequences */
-			crsr_x--;
-			vi_mode = MODE_COMMAND;
-			update_status();
-			return;
+			goto end_cmd_mode;
 
 		default:
 			break;
@@ -565,9 +589,14 @@ void edit_mode(void)
 		}
 		/* Insert character at cursor position */
 		insert_char(c);
-		write_shifted_line(cur_line_s, crsr_y);
+		redraw_line(cur_line_s, crsr_y);
 		crsr_restore();
 	}
+
+end_cmd_mode:
+	if (crsr_x > 1) crsr_x--;
+	vi_mode = MODE_COMMAND;
+	update_status();
 	return;
 }
 
@@ -613,7 +642,7 @@ static void do_cursor_left(void)
 	if (crsr_x == 1) {
 		if (line_shift > 0) {
 			line_shift_reduce(1);
-			write_shifted_line(cur_line_s, crsr_y);
+			redraw_line(cur_line_s, crsr_y);
 		}
 		return;
 	}
@@ -627,7 +656,7 @@ static void do_cursor_right(void)
 	if (crsr_x == term_cols) {
 		if ((cur_line_s->len - line_shift) > term_cols) {
 			line_shift_increase(1);
-			write_shifted_line(cur_line_s, crsr_y);
+			redraw_line(cur_line_s, crsr_y);
 		} else {
 			oh_dear_god_no("cmd: l: term_cols check");
 			return;
@@ -708,10 +737,15 @@ int do_cmd(char c)
 	case 'l':	/* right */
 		do_cursor_right();
 		break;
+	case 'o':
+		cur_line_s = alloc_new_line(cur_line, NULL);
+		go_to_start_of_next_line();
+		break;
 	case 'x':	/* Delete char at cursor */
 		do_del_under_crsr();
 		break;
 	case '!':	/* NON-STANDARD cursor pos dump */
+		redraw_screen();
 		sprintf(custom_status, "%dx%d, cx %d, cy %d, lin %d, cur %d, cll %d, cas %d",
 				term_cols, term_real_rows, crsr_x, crsr_y, line_count, cur_line,
 				cur_line_s->len, cur_line_s->alloc_size);
