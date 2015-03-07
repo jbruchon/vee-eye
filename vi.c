@@ -45,6 +45,7 @@ struct line {
 	struct line *next;
 	char *text;
 	int len;
+	int alloc_size;
 };
 static struct line *line_head = NULL;
 
@@ -82,6 +83,7 @@ static int line_count = 0;
 /* Escape sequence function definitions */
 #define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
 #define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
+#define ERASE_TO_EOL() write(STDOUT_FILENO, "\033[K", 3);
 #define CRSR_HOME() write(STDOUT_FILENO, "\033[H", 3);
 #define CRSR_UP() write(STDOUT_FILENO, "\033[1A", 4);
 #define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
@@ -96,6 +98,7 @@ static int line_count = 0;
 
 /***************************************************************************/
 
+#ifndef NO_SIGNALS
 /* Window size change handler */
 void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 {
@@ -104,6 +107,7 @@ void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 	redraw_screen();
 	return;
 }
+#endif	/* NO_SIGNALS */
 
 
 /* Read terminal dimensions */
@@ -201,12 +205,19 @@ static struct line *alloc_new_line(int start,
 	/* Allocate the text area (if applicable) */
 	if (new_text == NULL) {
 		new_line->len = 0;
-		new_line->text = (char *)malloc(1);
+		new_line->text = (char *)malloc(term_cols + 1);
 		if (!new_line->text) goto oom;
 		*(new_line->text) = '\0';
+		new_line->alloc_size = term_cols + 1;
 	} else {
 		new_line->len = strlen(new_text);
-		new_line->text = (char *)malloc(new_line->len + 1);
+		if (new_line->len < term_cols + 1) {
+			new_line->alloc_size = term_cols + 1;
+			new_line->text = (char *)malloc(term_cols + 1);
+		} else {
+			new_line->alloc_size = new_line->len + 1;
+			new_line->text = (char *)malloc(new_line->len + 1);
+		}
 		if (!new_line->text) goto oom;
 		strncpy(new_line->text, new_text, new_line->len);
 	}
@@ -300,11 +311,11 @@ static void write_shifted_line(struct line *line, int y)
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
-	ERASE_LINE();
 	sprintf(crsr_set_string, "\033[%d;1f", y);
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
+	if (crsr_y != term_cols) ERASE_TO_EOL();
 	write(STDOUT_FILENO, "\n", 1);
 	return;
 }
@@ -359,7 +370,7 @@ error_line_walk:
 
 
 /* Delete char at cursor location */
-static void do_del_crsr_char(void)
+static void do_del_under_crsr(void)
 {
 	char *p;
 
@@ -467,17 +478,69 @@ static void oh_dear_god_no(char *string)
 }
 
 
+void insert_char(char c)
+{
+	char *new_text;
+	char *p;
+
+	switch (vi_mode) {
+	case 1:	/* insert mode */
+		if (cur_line_s->alloc_size == (cur_line_s->len)) {
+			/* Allocate a double size buffer and insert to that*/
+			new_text = (char *)realloc(cur_line_s->text, cur_line_s->len << 1);
+			if (!new_text) goto oom;
+			cur_line_s->text = new_text;
+			cur_line_s->alloc_size = cur_line_s->len << 1;
+		}
+		/* Move text up by one byte */
+		p = cur_line_s->text + crsr_x + line_shift - 1;
+		memmove(p + 1, p, strlen(p) + 1);
+		*p = c;
+		crsr_x++;
+		cur_line_s->len++;
+		return;
+
+	case 2: /* replace mode */
+		return;
+	}
+
+	return;
+oom:
+	fprintf(stderr, "error: out of memory\n");
+	clean_abort();
+	return;
+}
+
+
 /* Editing mode. Doesn't return until ESC pressed. */
 void edit_mode(void)
 {
 	char c;
 	while (read(STDIN_FILENO, &c, 1)) {
 		switch (c) {
-		case 0:
+		case '\0':
+			continue;
+
+		case '\b':
+		case 0x7f:
+			if (crsr_x > 1) {
+				crsr_x--;
+				/* FIXME: Add joining of lines on backspace */
+				do_del_under_crsr();
+			}
+			continue;
+
+		case '\n':
+		case '\r':
+			cur_line_s = alloc_new_line(cur_line, NULL);
+			cur_line++;
+			crsr_y++;
+			crsr_x = 1;
 			continue;
 
 		case '\033':
 			/* FIXME: poll for ESC sequences */
+			crsr_x--;
 			vi_mode = MODE_COMMAND;
 			update_status();
 			return;
@@ -493,7 +556,9 @@ void edit_mode(void)
 			continue;
 		}
 		/* Insert character at cursor position */
-		/* FIXME */
+		insert_char(c);
+		write_shifted_line(cur_line_s, crsr_y);
+		CRSR_RESTORE();
 	}
 	return;
 }
@@ -513,10 +578,11 @@ static int get_command_string(char *command)
 		}
 
 		/* Backspace */
-		if (cc == '\b') {
+		if (cc == '\b' || cc == 0x7f) {
+			command[cmdsize] = '\0';
 			cmdsize--;
-			if (cmdsize < 0) return 0;
-			write(STDOUT_FILENO, "\b \b", 2);
+			if (cmdsize < 0) return 0;;
+			write(STDOUT_FILENO, "\b \b", 3);
 			continue;
 		}
 
@@ -573,12 +639,15 @@ static void do_cursor_up(void)
 	if (cur_line == 1) return;
 	if (cur_line_s->prev == NULL) return;
 	cur_line_s = cur_line_s->prev;
-	if (crsr_x > cur_line_s->len) {
-		crsr_x = cur_line_s->len;
-		if (crsr_x == 0) crsr_x = 1;
-	}
 	crsr_y--;
 	cur_line--;
+	if ((crsr_x + line_shift) > cur_line_s->len) {
+		if (cur_line_s->len <= line_shift)
+			line_shift = cur_line_s->len - 1;
+		crsr_x = cur_line_s->len - line_shift;
+		if (crsr_x == 0) crsr_x = 1;
+		redraw_screen();
+	}
 
 	return;
 }
@@ -589,12 +658,15 @@ static void do_cursor_down(void)
 	if (cur_line == line_count) return;
 	if (cur_line_s->next == NULL) return;
 	cur_line_s = cur_line_s->next;
-	if (crsr_x > cur_line_s->len) {
-		crsr_x = cur_line_s->len;
-		if (crsr_x == 0) crsr_x = 1;
-	}
 	crsr_y++;
 	cur_line++;
+	if ((crsr_x + line_shift) > cur_line_s->len) {
+		if (cur_line_s->len <= line_shift)
+			line_shift = cur_line_s->len - 1;
+		crsr_x = cur_line_s->len - line_shift;
+		if (crsr_x == 0) crsr_x = 1;
+		redraw_screen();
+	}
 
 	return;
 }
@@ -609,6 +681,8 @@ int do_cmd(char c)
 	case 'q':
 		goto end_vi;
 		break;
+	case 'a':
+		crsr_x++;
 	case 'i':
 		vi_mode = MODE_INSERT;
 		update_status();
@@ -627,14 +701,16 @@ int do_cmd(char c)
 		do_cursor_right();
 		break;
 	case 'x':	/* Delete char at cursor */
-		do_del_crsr_char();
+		do_del_under_crsr();
 		break;
 	case '!':	/* NON-STANDARD cursor pos dump */
-		sprintf(custom_status, "term %dx%d, c_x %d, c_y %d, lines %d, cur %d",
-				term_cols, term_real_rows, crsr_x, crsr_y, line_count, cur_line);
+		sprintf(custom_status, "%dx%d, cx %d, cy %d, lin %d, cur %d, cll %d, cas %d",
+				term_cols, term_real_rows, crsr_x, crsr_y, line_count, cur_line,
+				cur_line_s->len, cur_line_s->alloc_size);
 		break;
 	case ':':	/* Colon command */
 		CRSR_YX(term_real_rows, 1);
+		ERASE_LINE();
 		write(STDOUT_FILENO, ":", 1);
 		if (!get_command_string(command)) break;
 		if (strcmp(command, "q") == 0) goto end_vi;
@@ -662,12 +738,14 @@ int main(int argc, char **argv)
 	char c;
 	struct sigaction act;
 
+#ifndef NO_SIGNALS
 	/* Set up SIGWINCH handler for window resizing support */
 	memset(&act, 0, sizeof(struct sigaction));
 	sigemptyset(&act.sa_mask);
 	act.sa_sigaction = sigwinch_handler;
 	act.sa_flags = SA_SIGINFO;
 	sigaction(SIGWINCH, &act, NULL);
+#endif	/* NO_SIGNALS */
 
 	line_shift = 0;
 	if ((i = term_init()) != 0) {
