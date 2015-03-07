@@ -13,7 +13,7 @@ datarootdir=${prefix}/share
 datadir=${datarootdir}
 sysconfdir=${prefix}/etc
 
-OBJS=vi.c
+OBJS=vi.o
 
 all: vi manual
 

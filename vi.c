@@ -1,3 +1,21 @@
+/*
+ * vee-eye: Jody Bruchon's clone of 'vi'
+ * Copyright (C) 2015 by Jody Bruchon <jody@jodybruchon.com>
+ * Distributed under the MIT License (see LICENSE for details)
+ *
+ * This clone of 'vi' works with a doubly linked list of text lines.
+ * While it may be a bad idea in certain rare circumstances, the use
+ * of individual lines as the basic unit of data makes a lot of work
+ * in the code easier. The cursor is the "focal point" in this vi;
+ * everything is calculated relative to the cursor and the window.
+ * Lines longer than the terminal width are handled using a global
+ * "line shift" that pushes the screen to the right.
+ *
+ * I created it mainly as a challenge to learn and improve my skills
+ * in C. It is not a very serious project, but if it is useful to
+ * you, please let me know! I'll be happy to hear about it. :-)
+ */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
