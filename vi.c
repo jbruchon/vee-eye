@@ -27,15 +27,17 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
+/* Dev86 used for ELKS isn't C99 compliant */
+#ifdef __ELKS__
+#define uintptr_t unsigned short
+#define restrict
+#define inline
+#else
+#include <stdint.h>
+#endif	/* __ELKS__ */
+
 /* FIXME: This is only for testing purposes. */
 static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing. BLAH BLAH BLAH!";
-
-
-/* Function prototypes */
-static void read_term_dimensions(void);
-static void clean_abort(void);
-static void update_status(void);
-static void redraw_screen(void);
 
 
 /* Text is stored line-by-line. Line lengths are stored with the text data
@@ -51,6 +53,10 @@ struct line {
 	int alloc_size;
 };
 static struct line *line_head = NULL;
+
+/* Yank buffer */
+static struct line *yank_head = NULL;
+static int yank_line_count = 0;
 
 /* Terminal configuration data */
 static struct termios term_orig, term_config;
@@ -96,17 +102,34 @@ static int line_count = 0;
 #define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
 #define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
 
+
+/* Function prototypes */
+static void read_term_dimensions(void);
+static void clean_abort(void);
+static void update_status(void);
+static void redraw_screen(void);
+static void destroy_buffer(struct line **head);
+
+
 /***************************************************************************/
 
 /* Cursor control functions */
 void crsr_restore(void)
 {
+#ifdef __ELKS__
+	sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x);
+#else
 	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", crsr_y, crsr_x);
+#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 void crsr_yx(int row, int col)
 {
+#ifdef __ELKS__
+	sprintf(crsr_set_string, "\033[%d;%df", row, col);
+#else
 	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", row, col);
+#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
@@ -169,9 +192,9 @@ static void line_shift_increase(int count)
 
 
 /* Walk the line list to the requested line */
-static inline struct line *walk_to_line(int num)
+static inline struct line *walk_to_line(int num,
+		struct line *line)
 {
-	struct line *line = line_head;
 	int i = 1;
 
 	if (num == 0) return NULL;
@@ -186,23 +209,25 @@ static inline struct line *walk_to_line(int num)
 
 /* Allocate a new line after the selected line */
 static struct line *alloc_new_line(int start,
-		const char * const restrict new_text)
+		const char * const restrict new_text,
+		int *buf_line_count,
+		struct line **buf_head)
 {
 	struct line *prev_line, *new_line;
 	int new_ll;
 
 	/* Cannot open lines out of current range */
-	if (start > line_count) return NULL;
+	if (start > *buf_line_count) return NULL;
 
-	if (start > 0) prev_line = walk_to_line(start);
-	else prev_line = line_head;
+	if (start > 0) prev_line = walk_to_line(start, *buf_head);
+	else prev_line = *buf_head;
 
 	/* Insert a new line */
 	new_line = (struct line *)malloc(sizeof(struct line));
 	if (!new_line) goto oom;
 	if (prev_line == NULL) {
-		/* If line_head is NULL, no lines exist yet */
-		line_head = new_line;
+		/* If buf_head is NULL, no lines exist yet */
+		*buf_head = new_line;
 		new_line->next = NULL;
 		new_line->prev = NULL;
 	} else {
@@ -235,7 +260,7 @@ static struct line *alloc_new_line(int start,
 		strncpy(new_line->text, new_text, new_line->len);
 	}
 
-	line_count++;
+	*buf_line_count += 1;
 
 	return new_line;
 oom:
@@ -245,26 +270,96 @@ oom:
 	return NULL;
 }
 
-/* Destroy and free one line in the line list */
-static int destroy_line(int num)
+
+/* From the current line, yank data into the yank buffer
+ * If lines are specified, chars are ignored. If this is called with
+ * yank_add == 0, the yank buffer is destroyed and replaced. */
+static int yank(int lines, int chars, int yank_add)
 {
-	struct line *line;
-
-	line = walk_to_line(num);
-	if (line == NULL) return -1;
-	if (line->text != NULL) free(line->text);
-	line->prev->next = line->next;
-	free(line);
-
+	struct line *yank_line;
+return 0;
+	if (!yank_add) {
+		destroy_buffer(&yank_head);
+		yank_line_count = 0;
+	} else {
+		yank_line = yank_head;
+		while (yank_line->next) yank_line = yank_line->next;
+	}
 	return 0;
+
+oom:
+	fprintf(stderr, "Out of memory\n");
+	clean_abort();
+	return -1;
 }
 
-static void destroy_buffer(void)
+
+/* Destroy and free one line in the line list */
+static int destroy_current_line(int yank_add)
 {
-	struct line *line = line_head;
+	struct line *temp_line;
+
+	if (!yank_add) destroy_buffer(&yank_head);
+	if (cur_line_s == NULL) return -1;
+	if (cur_line > 1) {
+		if (cur_line_s->text != NULL) {
+			yank(1, 0, yank_add);
+			free(cur_line_s->text);
+		}
+		/* Detach the line to be destroyed from the list */
+		cur_line_s->prev->next = cur_line_s->next;
+		cur_line_s->next->prev = cur_line_s->prev;
+		/* Jump to the next line and destroy the previous one */
+		temp_line = cur_line_s;
+		cur_line_s = cur_line_s->next;
+		free(temp_line);
+		line_count--;
+	} else {
+		/* Line 1 must be handled differently */
+		if (line_count > 1) {
+			if (cur_line_s->next == NULL) goto error_line_null;
+			temp_line = cur_line_s;
+			cur_line_s = cur_line_s->next;
+			cur_line_s->prev = NULL;
+			if (temp_line->text != NULL) {
+				yank(1, 0, yank_add);
+				free(temp_line->text);
+			}
+			free(temp_line);
+			/* Update line_head if we just destroyed it */
+			if ((uintptr_t)temp_line == (uintptr_t)line_head)
+				line_head = cur_line_s;
+			line_count--;
+		} else {
+			yank(1, 0, yank_add);
+			/* Line 1 with no more lines */
+			cur_line_s->len = 0;
+			/* Warn if user tried to delete the only empty line */
+			if (*cur_line_s->text == '\0') return 1;
+			*(cur_line_s->text) = '\0';
+		}
+	}
+
+	redraw_screen();
+
+	return 0;
+
+error_line_null:
+	fprintf(stderr, "error: line 1 next ptr = NULL but line_count > 1\n");
+	clean_abort();
+	return -1;
+}
+
+
+/* Destroy every line in the selected buffer
+ * This is used to empty the yank buffer and to de-allocate the line buffer
+ * on program exit; use it like this: destroy_buffer(&buffer_head); */
+static void destroy_buffer(struct line **head)
+{
+	struct line *line = *head;
 	struct line *prev = NULL;
 
-	line_head = NULL;
+	*head = NULL;
 
 	/* Free lines in order until list is exhausted */
 	while (line != NULL) {
@@ -303,7 +398,11 @@ static void update_status(void)
 	} else if ((cur_line + term_rows) >= line_count) {
 		write(STDOUT_FILENO, " Bot", 4);
 	} else {
+#ifdef __ELKS__
+		sprintf(num, "%d%%", (line_count * 100) / top_line);
+#else
 		snprintf(num, 4, "%d%%", (line_count * 100) / top_line);
+#endif
 		write(STDOUT_FILENO, num, strlen(num));
 	}
 
@@ -324,7 +423,11 @@ static void redraw_line(struct line *line, int y)
 	char *p = line->text + line_shift;
 	int len = line->len - line_shift;
 
+#ifdef __ELKS__
+	sprintf(crsr_set_string, "\033[%d;1f", y);
+#else
 	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
+#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
@@ -348,7 +451,7 @@ static void redraw_screen(void)
 	start_y = cur_line + 1 - crsr_y;
 
 	/* Find the first line to write to the screen */
-	line = walk_to_line(start_y);
+	line = walk_to_line(start_y, line_head);
 	if (!line) goto error_line_walk;
 
 	/* Draw lines until no more are left */
@@ -383,11 +486,11 @@ error_line_walk:
 
 
 /* Delete char at cursor location */
-static void do_del_under_crsr(void)
+static int do_del_under_crsr(void)
 {
 	char *p;
 
-	if (cur_line_s->len == 0) return;
+	if (cur_line_s->len == 0) return 1;
 	p = cur_line_s->text + crsr_x + line_shift;
 
 	/* Copy everything down one char */
@@ -400,7 +503,7 @@ static void do_del_under_crsr(void)
 	}
 	redraw_line(cur_line_s, crsr_y);
 	crsr_restore();
-	return;
+	return 0;
 }
 
 
@@ -489,7 +592,8 @@ static int term_init(void)
 static void clean_abort(void)
 {
 	term_restore();
-	destroy_buffer();
+	destroy_buffer(&line_head);
+	destroy_buffer(&yank_head);
 	exit(EXIT_FAILURE);
 }
 
@@ -565,7 +669,7 @@ void edit_mode(void)
 		case '\r':	/* New line */
 			fragment = cur_line_s->text + line_shift + crsr_x - 1;
 
-			cur_line_s = alloc_new_line(cur_line, fragment);
+			cur_line_s = alloc_new_line(cur_line, fragment, &line_count, &line_head);
 			/* New lines need to break the old line apart */
 			if (*fragment != '\0') {
 				cur_line_s->prev->len = line_shift + crsr_x - 1;
@@ -584,7 +688,11 @@ void edit_mode(void)
 
 		/* Catch any invalid characters */
 		if (c < 32 || c > 127) {
+#ifdef __ELKS__
+			sprintf(custom_status, "Invalid char entered: %u", c);
+#else
 			snprintf(custom_status, MAX_STATUS, "Invalid char entered: %u", c);
+#endif
 			update_status();
 			continue;
 		}
@@ -714,13 +822,62 @@ static void do_cursor_down(void)
 int do_cmd(char c)
 {
 	char command[MAX_CMDSIZE];
+	int cmd_len = 1;
+	int num_times = 1;
+	int i;
 
-	switch (c) {
+	command[0] = c;
+
+	/* Clear any status that may already exist */
+	update_status();
+
+	while (c >= '0' && c <= '9') {
+		strncpy(custom_status, command, cmd_len);
+		update_status();
+		read(STDIN_FILENO, &c, 1);
+		command[cmd_len] = c; cmd_len++;
+		if (cmd_len == MAX_CMDSIZE - 1) break;
+	}
+
+	command[cmd_len] = c; cmd_len++;
+	strncpy(custom_status, command, cmd_len);
+	update_status();
+
+	/* User pressed ESC; cancel command */
+	if (c == '\033') goto end_cmd;
+	if (cmd_len > 1) {
+		strncpy(custom_status, command, cmd_len);
+		update_status();
+		c = command[cmd_len];
+		command[cmd_len] = '\0';
+		num_times = atoi(command);
+		command[cmd_len] = c;
+		if (num_times < 1) num_times = 1;
+	}
+
+	switch (command[cmd_len - 1]) {
 	case 'q':
 		goto end_vi;
 		break;
+	case 'd':
+		read(STDIN_FILENO, &c, 1);
+		if (c == '\033') goto end_cmd;
+		if (c == 'd') {
+			for (i = num_times; i > 0; i--) {
+				if (destroy_current_line((i == num_times) ? 0 : 1) == 1) {
+					if (i == num_times)
+						strcpy(custom_status, "Nothing to delete");
+					break;
+				}
+			}
+			if (i < num_times) sprintf(custom_status, "Deleted %d lines at %d",
+					num_times - i, cur_line);
+		}
+		/* TODO: handle motions */
+		break;
 	case 'a':
 		crsr_x++;
+		/* Append is insert with the cursor moved right */
 	case 'i':
 		vi_mode = MODE_INSERT;
 		update_status();
@@ -739,12 +896,21 @@ int do_cmd(char c)
 		do_cursor_right();
 		break;
 	case 'o':
-		cur_line_s = alloc_new_line(cur_line, NULL);
+		cur_line_s = alloc_new_line(cur_line, NULL, &line_count, &line_head);
 		go_to_start_of_next_line();
 		break;
 	case 'x':	/* Delete char at cursor */
-		do_del_under_crsr();
+		i = num_times;
+		for (i = num_times; i > 0; i--) {
+			if (do_del_under_crsr() == 1) {
+				if (i == num_times) strcpy(custom_status, "Nothing to delete");
+				break;
+			}
+		}
+		if (i < num_times) sprintf(custom_status, "Deleted %d chars at %d,%d",
+			num_times - i, cur_line, crsr_x + line_shift);
 		break;
+#ifndef __ELKS__
 	case '!':	/* NON-STANDARD cursor pos dump */
 		redraw_screen();
 		snprintf(custom_status, MAX_STATUS,
@@ -753,17 +919,24 @@ int do_cmd(char c)
 				line_count, cur_line, cur_line_s->len,
 				cur_line_s->alloc_size);
 		break;
+#endif	/* __ELKS__ */
 	case ':':	/* Colon command */
 		crsr_yx(term_real_rows, 1);
 		ERASE_LINE();
 		write(STDOUT_FILENO, ":", 1);
 		if (!get_command_string(command)) break;
-		if (strcmp(command, "q") == 0) goto end_vi;
+		if (strcmp(command, "q!") == 0) goto end_vi;
 		break;
 	default:
+#ifdef __ELKS__
+		sprintf(custom_status, "Unknown key %u", c);
+#else
 		snprintf(custom_status, MAX_STATUS, "Unknown key %u", c);
+#endif
 		break;
 	}
+
+end_cmd:
 	crsr_restore();
 	update_status();
 	return 0;
@@ -772,7 +945,8 @@ end_vi:
 	crsr_yx(term_real_rows, 1);
 	ERASE_LINE();
 	term_restore();
-	destroy_buffer();
+	destroy_buffer(&line_head);
+	destroy_buffer(&yank_head);
 	exit(EXIT_SUCCESS);
 }
 
@@ -803,12 +977,12 @@ int main(int argc, char **argv)
 	CLEAR_SCREEN();
 
 	/* Set up the testing line(s) */
-	cur_line_s = alloc_new_line(line_count, initial_line);
+	cur_line_s = alloc_new_line(line_count, initial_line, &line_count, &line_head);
 	if (!cur_line_s) {
 		fprintf(stderr, "Cannot create initial line\n");
 		clean_abort();
 	}
-	if (!alloc_new_line(line_count, "test")) {
+	if (!alloc_new_line(line_count, "test", &line_count, &line_head)) {
 		fprintf(stderr, "Cannot create second line\n");
 		clean_abort();
 	}
