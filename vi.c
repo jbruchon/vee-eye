@@ -18,7 +18,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,11 +27,16 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 
+#ifndef NO_SIGNALS
+#include <signal.h>
+#endif	/* NO_SIGNALS */
+
 /* Dev86 used for ELKS isn't C99 compliant */
 #ifdef __ELKS__
 #define uintptr_t unsigned short
 #define restrict
 #define inline
+#define PATH_MAX 256
 #else
 #include <stdint.h>
 #endif	/* __ELKS__ */
@@ -70,6 +75,10 @@ static int term_cols;
 static int crsr_x, crsr_y, cur_line, line_shift;
 #define MAX_CRSR_SETSTRING 16
 static char crsr_set_string[MAX_CRSR_SETSTRING];
+
+/* Current file name */
+static char curfile[PATH_MAX];
+
 /* Track current line's struct pointer to avoid extra walks */
 static struct line *cur_line_s = NULL;
 
@@ -277,13 +286,18 @@ oom:
 static int yank(int lines, int chars, int yank_add)
 {
 	struct line *yank_line;
-return 0;
+	int yank_cur_line = 1;
+return 0; /* FIXME: finish this code */
 	if (!yank_add) {
+		/* Destroy the yank buffer and allocate a new one */
 		destroy_buffer(&yank_head);
 		yank_line_count = 0;
+		yank_head = alloc_new_line(0, NULL, &yank_line_count, &yank_head);
 	} else {
 		yank_line = yank_head;
-		while (yank_line->next) yank_line = yank_line->next;
+		while (yank_line->next) {
+			yank_line = yank_line->next;
+		}
 	}
 	return 0;
 
@@ -818,10 +832,23 @@ static void do_cursor_down(void)
 }
 
 
+/* Save the buffer to the file specified */
+int save_file(const char * const restrict name)
+{
+	if (*name == '\0') {
+		strcpy(custom_status, "Cannot write: no file name given");
+		return -1;
+	}
+	/* TODO: save the file */
+	return 0;
+}
+
+
 /* Handle an incoming command */
 int do_cmd(char c)
 {
 	char command[MAX_CMDSIZE];
+	char *savefile;
 	int cmd_len = 1;
 	int num_times = 1;
 	int i;
@@ -920,13 +947,28 @@ int do_cmd(char c)
 				cur_line_s->alloc_size);
 		break;
 #endif	/* __ELKS__ */
+
 	case ':':	/* Colon command */
 		crsr_yx(term_real_rows, 1);
 		ERASE_LINE();
 		write(STDOUT_FILENO, ":", 1);
 		if (!get_command_string(command)) break;
+		if (strcmp(command, "wq") == 0) {
+			/* Save to current file */
+			save_file(curfile);
+			goto end_cmd;
+			/* TODO: actually save the buffer */
+		}
+		if (strncmp(command, "w ", 2) == 0) {
+			/* Save the file specified */
+			savefile = command + 2;
+			if (*savefile == '\0') save_file(curfile);
+			else save_file(savefile);
+			goto end_cmd;
+		}
 		if (strcmp(command, "q!") == 0) goto end_vi;
 		break;
+
 	default:
 #ifdef __ELKS__
 		sprintf(custom_status, "Unknown key %u", c);
@@ -936,6 +978,7 @@ int do_cmd(char c)
 		break;
 	}
 
+	/* Any command can jump here to finish up, including status updates */
 end_cmd:
 	crsr_restore();
 	update_status();
@@ -955,9 +998,9 @@ int main(int argc, char **argv)
 {
 	int i;
 	char c;
+#ifndef NO_SIGNALS
 	struct sigaction act;
 
-#ifndef NO_SIGNALS
 	/* Set up SIGWINCH handler for window resizing support */
 	memset(&act, 0, sizeof(struct sigaction));
 	sigemptyset(&act.sa_mask);
@@ -975,6 +1018,9 @@ int main(int argc, char **argv)
 
 	read_term_dimensions();
 	CLEAR_SCREEN();
+
+	/* FIXME: For now, don't try to open a file */
+	*curfile = '\0';
 
 	/* Set up the testing line(s) */
 	cur_line_s = alloc_new_line(line_count, initial_line, &line_count, &line_head);
