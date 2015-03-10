@@ -45,6 +45,41 @@
 static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing. BLAH BLAH BLAH!";
 
 
+/* The current movement command parameters (cursor-relative)
+ * Movement is stored as either a destination line/char or a count of
+ * chars relative to the cursor. When all three numbers are zero, there
+ * is no movement stored. We store movements in this way so that any
+ * command which consists of an operation and a movement can use any 
+ * valid movement to modify its operations. dest_line set with
+ * dest_char==0 is a special case: if no dest_char is specified, the
+ * movement operates on full lines. An example: if the user types the
+ * 'dd' command, the movement specification will be dest_line = 1,
+ * dest_char = 0. This will perform the 'd' command (delete) on all lines
+ * starting at cur_line until it reaches (cur_line + dest_line). Likewise,
+ * if a 'dw' is performed, the word movement portion will scan for the
+ * next word break and specify its exact location relative to the cursor;
+ * for example, if the cursor is on the third letter of "birds" in the
+ * two line area:
+ *
+ * ...blah blah blah, but when birds
+ * attack me, I run away
+ *
+ * the movement from the 'r' in 'birds' to the start of the next word
+ * will break across a line and the movement will be stored as:
+ * dest_line = 1, dest_char = 1. Basically, dest_char works as a flag
+ * to indicate if the ranging is line-by-line or char-by-char.
+ *
+ * start_line and start_char are almost always set to be equal to cur_line
+ * and (crsr_x + line_shift) respectively (these are the cursor's current
+ * (X,Y) coordinates in the whole file.)
+ */
+static struct movement {
+	int start_line;
+	int start_char;
+	int dest_line;
+	int dest_char;
+} cur_movement;
+
 /* Text is stored line-by-line. Line lengths are stored with the text data
  * to avoid lots of strlen() calls for line wrapping, insertion, etc.
  * alloc_size is the total allocated size of the text[] element. This
@@ -91,7 +126,7 @@ static struct line *cur_line_s = NULL;
 #define MODE_REPLACE 2
 static int vi_mode = 0;
 static const char * const mode_string[] = {
-	"", "--- INSERT ---", "--- REPLACE ---"
+	"", "-- INSERT --", "-- REPLACE --"
 };
 #define MAX_STATUS 64
 static char custom_status[MAX_STATUS] = "";
@@ -281,24 +316,30 @@ oom:
 
 
 /* From the current line, yank data into the yank buffer
+ * If this_text is set, a single line (string) will be yanked from
+ * this_text and no complex movement work will be done.
  * If lines are specified, chars are ignored. If this is called with
  * yank_add == 0, the yank buffer is destroyed and replaced. */
-static int yank(int lines, int chars, int yank_add)
+static int yank(char *this_text)
 {
 	struct line *yank_line;
 	int yank_cur_line = 1;
+
 return 0; /* FIXME: finish this code */
-	if (!yank_add) {
-		/* Destroy the yank buffer and allocate a new one */
-		destroy_buffer(&yank_head);
-		yank_line_count = 0;
-		yank_head = alloc_new_line(0, NULL, &yank_line_count, &yank_head);
+
+	/* Destroy the yank buffer and allocate a new one */
+	destroy_buffer(&yank_head);
+	yank_line_count = 0;
+
+	if (this_text != NULL) {
+		/* Special case: yank the line pointed to directly */
+		yank_head = alloc_new_line(0, this_text, &yank_line_count, &yank_head);
+		return 0;
 	} else {
-		yank_line = yank_head;
-		while (yank_line->next) {
-			yank_line = yank_line->next;
-		}
+		/* Yanking chars or more than just a single explicit line */
+		yank_head = alloc_new_line(0, NULL, &yank_line_count, &yank_head);
 	}
+	/* Yank the range indicated by cur_movement */
 	return 0;
 
 oom:
@@ -309,48 +350,39 @@ oom:
 
 
 /* Destroy and free one line in the line list */
-static int destroy_current_line(int yank_add)
+static int destroy_line(struct line *target_line)
 {
 	struct line *temp_line;
 
-	if (!yank_add) destroy_buffer(&yank_head);
-	if (cur_line_s == NULL) return -1;
-	if (cur_line > 1) {
-		if (cur_line_s->text != NULL) {
-			yank(1, 0, yank_add);
-			free(cur_line_s->text);
-		}
+	if (target_line == NULL) return -1;
+	if (target_line->prev != NULL) {
+		if (target_line->text != NULL) free(target_line->text);
 		/* Detach the line to be destroyed from the list */
-		cur_line_s->prev->next = cur_line_s->next;
-		cur_line_s->next->prev = cur_line_s->prev;
+		target_line->prev->next = target_line->next;
+		if (target_line->next != NULL)
+			target_line->next->prev = target_line->prev;
 		/* Jump to the next line and destroy the previous one */
-		temp_line = cur_line_s;
-		cur_line_s = cur_line_s->next;
-		free(temp_line);
+		free(target_line);
 		line_count--;
 	} else {
 		/* Line 1 must be handled differently */
 		if (line_count > 1) {
-			if (cur_line_s->next == NULL) goto error_line_null;
-			temp_line = cur_line_s;
-			cur_line_s = cur_line_s->next;
-			cur_line_s->prev = NULL;
-			if (temp_line->text != NULL) {
-				yank(1, 0, yank_add);
-				free(temp_line->text);
-			}
+			if (target_line->next == NULL) goto error_line_null;
+			temp_line = target_line;
+			target_line = target_line->next;
+			target_line->prev = NULL;
+			if (temp_line->text != NULL) free(temp_line->text);
 			free(temp_line);
 			/* Update line_head if we just destroyed it */
 			if ((uintptr_t)temp_line == (uintptr_t)line_head)
-				line_head = cur_line_s;
+				line_head = target_line;
 			line_count--;
 		} else {
-			yank(1, 0, yank_add);
 			/* Line 1 with no more lines */
-			cur_line_s->len = 0;
+			target_line->len = 0;
 			/* Warn if user tried to delete the only empty line */
-			if (*cur_line_s->text == '\0') return 1;
-			*(cur_line_s->text) = '\0';
+			if (*target_line->text == '\0') return 1;
+			*(target_line->text) = '\0';
 		}
 	}
 
@@ -500,7 +532,7 @@ error_line_walk:
 
 
 /* Delete char at cursor location */
-static int do_del_under_crsr(void)
+static int do_del_under_crsr(int left)
 {
 	char *p;
 
@@ -675,7 +707,7 @@ void edit_mode(void)
 			if (crsr_x > 1) {
 				crsr_x--;
 				/* FIXME: Add joining of lines on backspace */
-				do_del_under_crsr();
+				do_del_under_crsr(0);
 			}
 			continue;
 
@@ -694,7 +726,7 @@ void edit_mode(void)
 
 		case '\033':
 			/* FIXME: poll for ESC sequences */
-			goto end_cmd_mode;
+			goto end_edit_mode;
 
 		default:
 			break;
@@ -716,7 +748,7 @@ void edit_mode(void)
 		crsr_restore();
 	}
 
-end_cmd_mode:
+end_edit_mode:
 	if (crsr_x > 1) crsr_x--;
 	vi_mode = MODE_COMMAND;
 	update_status();
@@ -844,6 +876,51 @@ int save_file(const char * const restrict name)
 }
 
 
+/* Get a movement subcommand
+ * Returns 0 on valid movement, -1 on invalid movement or ESC
+ * Returns 1 on invalid movement to allow 'dd' 'yy' etc. to work */
+int get_movement(char *command, int cmd_len, int num_times)
+{
+	char c;
+
+	while (read(STDIN_FILENO, &c, 1)) {
+		/* Handle numbers first */
+		if (c >= '1' && c <= '9') {
+		}
+		switch(c) {
+		case '\033':
+			return -1;
+		case 'h':	/* left */
+		case 'j':	/* down */
+		case 'k':	/* up */
+		case 'l':	/* right */
+		case 'H':	/* top of screen */
+		case 'M':	/* middle of screen */
+		case 'L':	/* bottom of screen */
+		case 'w':	/* next word */
+		case 'W':	/* previous word */
+		case 'b':	/* beginning of word */
+		case 'B':	/* beginning of blank-delimited word */
+		case 'e':	/* end of word */
+		case 'E':	/* end of blank-delimited word */
+		case '(':	/* one sentence back */
+		case ')':	/* one sentence forward */
+		case '{':	/* one paragraph back */
+		case '}':	/* one paragraph forward */
+		case '0':	/* beginning of line */
+		case '$':	/* end of line */
+		case 'G':	/* last line of file */
+		case ':':	/* move to :n line of file */
+		case 'f':	/* fc: move forward to char 'c' */
+		case 'F':	/* Fc: move backward to char 'c' */
+		case '%':	/* move to associated (), {}, or [] */
+		default:
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Handle an incoming command */
 int do_cmd(char c)
 {
@@ -887,11 +964,18 @@ int do_cmd(char c)
 		goto end_vi;
 		break;
 	case 'd':
+		/* TODO: Replace with yank + delete in the movement section */
 		read(STDIN_FILENO, &c, 1);
 		if (c == '\033') goto end_cmd;
 		if (c == 'd') {
 			for (i = num_times; i > 0; i--) {
-				if (destroy_current_line((i == num_times) ? 0 : 1) == 1) {
+				if (cur_line == line_count) {
+					if (cur_line > 1) {
+						cur_line_s = cur_line_s->prev;
+						destroy_line(cur_line_s->prev);
+					}
+				}
+				if (destroy_line(cur_line_s)) {
 					if (i == num_times)
 						strcpy(custom_status, "Nothing to delete");
 					break;
@@ -900,12 +984,11 @@ int do_cmd(char c)
 			if (i < num_times) sprintf(custom_status, "Deleted %d lines at %d",
 					num_times - i, cur_line);
 		}
-		/* TODO: handle motions */
 		break;
-	case 'a':
-		crsr_x++;
+	case 'a':	/* append insert */
 		/* Append is insert with the cursor moved right */
-	case 'i':
+		crsr_x++;
+	case 'i':	/* insert */
 		vi_mode = MODE_INSERT;
 		update_status();
 		edit_mode();
@@ -929,13 +1012,16 @@ int do_cmd(char c)
 	case 'x':	/* Delete char at cursor */
 		i = num_times;
 		for (i = num_times; i > 0; i--) {
-			if (do_del_under_crsr() == 1) {
-				if (i == num_times) strcpy(custom_status, "Nothing to delete");
-				break;
-			}
+			if (do_del_under_crsr(0) == 1) break;
 		}
-		if (i < num_times) sprintf(custom_status, "Deleted %d chars at %d,%d",
-			num_times - i, cur_line, crsr_x + line_shift);
+		break;
+	case 'X':	/* Delete char left of cursor */
+		i = num_times;
+		for (i = num_times; i > 0; i--) {
+			if (crsr_x == 1) break;
+			crsr_x--;
+			if (do_del_under_crsr(1) == 1) break;
+		}
 		break;
 #ifndef __ELKS__
 	case '!':	/* NON-STANDARD cursor pos dump */
