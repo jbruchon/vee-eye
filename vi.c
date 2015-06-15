@@ -28,17 +28,17 @@
 #include <sys/types.h>
 
 #ifndef NO_SIGNALS
-#include <signal.h>
+ #include <signal.h>
 #endif	/* NO_SIGNALS */
 
 /* Dev86 used for ELKS isn't C99 compliant */
 #ifdef __ELKS__
-#define uintptr_t unsigned short
-#define restrict
-#define inline
-#define PATH_MAX 256
+ #define uintptr_t unsigned short
+ #define restrict
+ #define inline
+ #define PATH_MAX 256
 #else
-#include <stdint.h>
+ #include <stdint.h>
 #endif	/* __ELKS__ */
 
 /* FIXME: This is only for testing purposes. */
@@ -299,9 +299,9 @@ static struct line *alloc_new_line(int start,
 		new_ll = ((new_line->len + 1) >> 5) + 1;
 		new_ll <<= 5;
 		new_line->alloc_size = new_ll;
-		new_line->text = (char *)malloc(new_ll);
+		new_line->text = (char *)calloc(1, new_ll);
 		if (!new_line->text) goto oom;
-		strncpy(new_line->text, new_text, new_line->len);
+		strcpy(new_line->text, new_text);
 	}
 
 	*buf_line_count += 1;
@@ -434,7 +434,7 @@ static void update_status(void)
 	*custom_status = '\0';
 
 	/* Print our location in the current line and file */
-	crsr_yx(term_real_rows, term_cols - 20);
+	crsr_yx(term_real_rows, term_cols - 16);
 	printf("%d,%d", cur_line, crsr_x + line_shift);
 	crsr_yx(term_real_rows, term_cols - 5);
 	top_line = 1 + (cur_line - crsr_y);
@@ -694,7 +694,7 @@ oom:
 /* Editing mode. Doesn't return until ESC pressed. */
 void edit_mode(void)
 {
-	char c;
+	unsigned char c;
 	char *fragment;
 
 	while (read(STDIN_FILENO, &c, 1)) {
@@ -714,6 +714,8 @@ void edit_mode(void)
 		case '\n':
 		case '\r':	/* New line */
 			fragment = cur_line_s->text + line_shift + crsr_x - 1;
+			sprintf(custom_status, "txt %p, adjtxt %p, ls+cx %d+%d",
+					cur_line_s->text, fragment, line_shift, crsr_x);
 
 			cur_line_s = alloc_new_line(cur_line, fragment, &line_count, &line_head);
 			/* New lines need to break the old line apart */
@@ -807,7 +809,7 @@ static void do_cursor_left(void)
 
 static void do_cursor_right(void)
 {
-	if (crsr_x == cur_line_s->len) return;
+	if (crsr_x > cur_line_s->len) return;
 	if (crsr_x == term_cols) {
 		if ((cur_line_s->len - line_shift) > term_cols) {
 			line_shift_increase(1);
@@ -817,7 +819,7 @@ static void do_cursor_right(void)
 			return;
 		}
 	} else {
-		if (crsr_x < (cur_line_s->len - line_shift)) {
+		if (crsr_x <= (cur_line_s->len - line_shift)) {
 			crsr_x++;
 			CRSR_RIGHT();
 		}
@@ -831,8 +833,9 @@ static void do_cursor_up(void)
 	if (cur_line == 1) return;
 	if (cur_line_s->prev == NULL) return;
 	cur_line_s = cur_line_s->prev;
-	crsr_y--;
 	cur_line--;
+	if (crsr_y > 1) crsr_y--;
+	else redraw_screen();
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
 			line_shift = cur_line_s->len - 1;
@@ -850,8 +853,9 @@ static void do_cursor_down(void)
 	if (cur_line == line_count) return;
 	if (cur_line_s->next == NULL) return;
 	cur_line_s = cur_line_s->next;
-	crsr_y++;
 	cur_line++;
+	if (crsr_y < term_rows) crsr_y++;
+	else redraw_screen();
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
 			line_shift = cur_line_s->len - 1;
@@ -867,6 +871,8 @@ static void do_cursor_down(void)
 /* Save the buffer to the file specified */
 int save_file(const char * const restrict name)
 {
+	FILE *fp;
+
 	if (*name == '\0') {
 		strcpy(custom_status, "Cannot write: no file name given");
 		return -1;
@@ -889,6 +895,7 @@ int get_movement(char *command, int cmd_len, int num_times)
 		}
 		switch(c) {
 		case '\033':
+		case '\027':
 			return -1;
 		case 'h':	/* left */
 		case 'j':	/* down */
@@ -926,7 +933,7 @@ int do_cmd(char c)
 {
 	char command[MAX_CMDSIZE];
 	char *savefile;
-	int cmd_len = 1;
+	int cmd_len = 0;
 	int num_times = 1;
 	int i;
 
@@ -960,9 +967,6 @@ int do_cmd(char c)
 	}
 
 	switch (command[cmd_len - 1]) {
-	case 'q':
-		goto end_vi;
-		break;
 	case 'd':
 		/* TODO: Replace with yank + delete in the movement section */
 		read(STDIN_FILENO, &c, 1);
@@ -970,15 +974,17 @@ int do_cmd(char c)
 		if (c == 'd') {
 			for (i = num_times; i > 0; i--) {
 				if (cur_line == line_count) {
+					/* Last/only line is a special case */
 					if (cur_line > 1) {
-						cur_line_s = cur_line_s->prev;
-						destroy_line(cur_line_s->prev);
+						do_cursor_up();
+						destroy_line(cur_line_s->next);
+						cur_line--;
+					} else {
+						destroy_line(cur_line_s);
 					}
-				}
-				if (destroy_line(cur_line_s)) {
-					if (i == num_times)
-						strcpy(custom_status, "Nothing to delete");
-					break;
+				} else {
+					cur_line_s = cur_line_s->next;
+					destroy_line(cur_line_s->prev);
 				}
 			}
 			if (i < num_times) sprintf(custom_status, "Deleted %d lines at %d",
@@ -987,7 +993,7 @@ int do_cmd(char c)
 		break;
 	case 'a':	/* append insert */
 		/* Append is insert with the cursor moved right */
-		crsr_x++;
+		do_cursor_right();
 	case 'i':	/* insert */
 		vi_mode = MODE_INSERT;
 		update_status();
@@ -1027,9 +1033,9 @@ int do_cmd(char c)
 	case '!':	/* NON-STANDARD cursor pos dump */
 		redraw_screen();
 		snprintf(custom_status, MAX_STATUS,
-				"%dx%d, cx %d, cy %d, lin %d, cur %d, cll %d, cas %d",
+				"%dx%d, cx %d, cy %d, ln %d of %d (len %d), clsalsz %d",
 				term_cols, term_real_rows, crsr_x, crsr_y,
-				line_count, cur_line, cur_line_s->len,
+				cur_line, line_count, cur_line_s->len,
 				cur_line_s->alloc_size);
 		break;
 #endif	/* __ELKS__ */
@@ -1041,9 +1047,14 @@ int do_cmd(char c)
 		if (!get_command_string(command)) break;
 		if (strcmp(command, "wq") == 0) {
 			/* Save to current file */
-			save_file(curfile);
-			goto end_cmd;
+			if (*curfile != '\0') {
+				save_file(curfile);
+				goto end_vi;
+			} else {
 			/* TODO: actually save the buffer */
+				strcpy(custom_status, "Can't save. Type :w name_of_file instead.");
+				goto end_cmd;
+			}
 		}
 		if (strncmp(command, "w ", 2) == 0) {
 			/* Save the file specified */
@@ -1052,6 +1063,7 @@ int do_cmd(char c)
 			else save_file(savefile);
 			goto end_cmd;
 		}
+		if (strcmp(command, "q") == 0) goto end_vi;
 		if (strcmp(command, "q!") == 0) goto end_vi;
 		break;
 
