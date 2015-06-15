@@ -49,7 +49,7 @@ static const char initial_line[] = "Now is the time for all good men to come to 
  * Movement is stored as either a destination line/char or a count of
  * chars relative to the cursor. When all three numbers are zero, there
  * is no movement stored. We store movements in this way so that any
- * command which consists of an operation and a movement can use any 
+ * command which consists of an operation and a movement can use any
  * valid movement to modify its operations. dest_line set with
  * dest_char==0 is a special case: if no dest_char is specified, the
  * movement operates on full lines. An example: if the user types the
@@ -134,6 +134,10 @@ static char custom_status[MAX_STATUS] = "";
 /* Total number of lines allocated */
 static int line_count = 0;
 
+/* File read/write buffer */
+#define CHUNK_SIZE 4096
+static char buf[CHUNK_SIZE];
+
 /* Escape sequence function definitions */
 #define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
 #define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
@@ -153,9 +157,14 @@ static void clean_abort(void);
 static void update_status(void);
 static void redraw_screen(void);
 static void destroy_buffer(struct line **head);
+static void do_cursor_up(void);
+static void do_cursor_down(void);
+static void do_cursor_left(void);
+static void do_cursor_right(void);
 
 
 /***************************************************************************/
+
 
 /* Cursor control functions */
 void crsr_restore(void)
@@ -216,12 +225,33 @@ static void invalid_command(void)
 }
 
 
+/* Write a line to the screen with appropriate shift */
+static void redraw_line(struct line *line, int y)
+{
+	char *p = line->text + line_shift;
+	int len = line->len - line_shift;
+
+#ifdef __ELKS__
+	sprintf(crsr_set_string, "\033[%d;1f", y);
+#else
+	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
+#endif
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
+	if (len > term_cols) len = term_cols;
+	write(STDOUT_FILENO, p, len);
+	if (crsr_y != term_cols) ERASE_TO_EOL();
+	write(STDOUT_FILENO, "\n", 1);
+	return;
+}
+
+
 /* Reduce line shift and redraw entire screen */
 static void line_shift_reduce(int count)
 {
 	if (count >= line_shift) line_shift = 0;
 	else line_shift -= count;
-	redraw_screen();
+	//redraw_screen();
+	redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
@@ -230,7 +260,8 @@ static void line_shift_reduce(int count)
 static void line_shift_increase(int count)
 {
 	line_shift += count;
-	redraw_screen();
+	//redraw_screen();
+	redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
@@ -251,6 +282,14 @@ static inline struct line *walk_to_line(int num,
 }
 
 
+/* Out of memory */
+void oom(void) {
+	strcpy(custom_status, "out of memory");
+	update_status();
+	clean_abort();
+}
+
+
 /* Allocate a new line after the selected line */
 static struct line *alloc_new_line(int start,
 		const char * const restrict new_text,
@@ -268,7 +307,7 @@ static struct line *alloc_new_line(int start,
 
 	/* Insert a new line */
 	new_line = (struct line *)malloc(sizeof(struct line));
-	if (!new_line) goto oom;
+	if (!new_line) oom();
 	if (prev_line == NULL) {
 		/* If buf_head is NULL, no lines exist yet */
 		*buf_head = new_line;
@@ -288,7 +327,7 @@ static struct line *alloc_new_line(int start,
 	if (new_text == NULL) {
 		new_line->len = 0;
 		new_line->text = (char *)malloc(32);
-		if (!new_line->text) goto oom;
+		if (!new_line->text) oom();
 		*(new_line->text) = '\0';
 		new_line->alloc_size = 32;
 	} else {
@@ -300,18 +339,13 @@ static struct line *alloc_new_line(int start,
 		new_ll <<= 5;
 		new_line->alloc_size = new_ll;
 		new_line->text = (char *)calloc(1, new_ll);
-		if (!new_line->text) goto oom;
+		if (!new_line->text) oom();
 		strcpy(new_line->text, new_text);
 	}
 
 	*buf_line_count += 1;
 
 	return new_line;
-oom:
-	fprintf(stderr, "out of memory\n");
-	clean_abort();
-
-	return NULL;
 }
 
 
@@ -341,11 +375,6 @@ return 0; /* FIXME: finish this code */
 	}
 	/* Yank the range indicated by cur_movement */
 	return 0;
-
-oom:
-	fprintf(stderr, "Out of memory\n");
-	clean_abort();
-	return -1;
 }
 
 
@@ -458,28 +487,9 @@ static void update_status(void)
 	return;
 
 error_top_line:
-	fprintf(stderr, "error: top line is invalid (%d, %d, %d)\n", top_line, cur_line, crsr_y);
+	fprintf(stderr, "\n\nerror: top line is invalid (%d, %d, %d)\n",
+			top_line, cur_line, crsr_y);
 	clean_abort();
-}
-
-
-/* Write a line to the screen with appropriate shift */
-static void redraw_line(struct line *line, int y)
-{
-	char *p = line->text + line_shift;
-	int len = line->len - line_shift;
-
-#ifdef __ELKS__
-	sprintf(crsr_set_string, "\033[%d;1f", y);
-#else
-	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
-#endif
-	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
-	if (len > term_cols) len = term_cols;
-	write(STDOUT_FILENO, p, len);
-	if (crsr_y != term_cols) ERASE_TO_EOL();
-	write(STDOUT_FILENO, "\n", 1);
-	return;
 }
 
 
@@ -542,7 +552,7 @@ static int do_del_under_crsr(int left)
 	/* Copy everything down one char */
 	memmove(p - 1, p, strlen(p) + 1);
 	cur_line_s->len--;
-	if (crsr_x > (cur_line_s->len - line_shift)) crsr_x--;
+	if (crsr_x > (cur_line_s->len - line_shift + 1)) crsr_x--;
 	if (crsr_x < 1) {
 		if (line_shift > 0) line_shift_reduce(1);
 		crsr_x = 1;
@@ -556,6 +566,7 @@ static int do_del_under_crsr(int left)
 static void go_to_start_of_next_line(void)
 {
 	cur_line++;
+	cur_line_s = cur_line_s->next;
 	line_shift = 0;
 	crsr_x = 1;
 	/* Handle scrolling */
@@ -662,9 +673,9 @@ void insert_char(char c)
 	switch (vi_mode) {
 	case 1:	/* insert mode */
 		if (cur_line_s->alloc_size == (cur_line_s->len)) {
-			/* Allocate a double size buffer and insert to that*/
+			/* Allocate a larger buffer and insert to that */
 			new_text = (char *)realloc(cur_line_s->text, cur_line_s->len << 1);
-			if (!new_text) goto oom;
+			if (!new_text) oom();
 			cur_line_s->text = new_text;
 			cur_line_s->alloc_size = cur_line_s->len << 1;
 		}
@@ -683,10 +694,6 @@ void insert_char(char c)
 		return;
 	}
 
-	return;
-oom:
-	fprintf(stderr, "error: out of memory\n");
-	clean_abort();
 	return;
 }
 
@@ -717,10 +724,11 @@ void edit_mode(void)
 			sprintf(custom_status, "txt %p, adjtxt %p, ls+cx %d+%d",
 					cur_line_s->text, fragment, line_shift, crsr_x);
 
-			cur_line_s = alloc_new_line(cur_line, fragment, &line_count, &line_head);
+			alloc_new_line(cur_line, fragment, &line_count, &line_head);
+
 			/* New lines need to break the old line apart */
 			if (*fragment != '\0') {
-				cur_line_s->prev->len = line_shift + crsr_x - 1;
+				cur_line_s->len = line_shift + crsr_x - 1;
 				*fragment = '\0';
 			}
 			go_to_start_of_next_line();
@@ -836,6 +844,7 @@ static void do_cursor_up(void)
 	cur_line--;
 	if (crsr_y > 1) crsr_y--;
 	else redraw_screen();
+	/* Pull the cursor to EOL if it is too far over */
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
 			line_shift = cur_line_s->len - 1;
@@ -856,6 +865,7 @@ static void do_cursor_down(void)
 	cur_line++;
 	if (crsr_y < term_rows) crsr_y++;
 	else redraw_screen();
+	/* Pull the cursor to EOL if it is too far over */
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
 			line_shift = cur_line_s->len - 1;
@@ -865,6 +875,37 @@ static void do_cursor_down(void)
 	}
 
 	return;
+}
+
+
+/* Load a file into buffer starting at a particular line */
+int load_file(const char * const restrict name, const int start_line)
+{
+	FILE *fp;
+	int line = start_line;
+	int line_count = 0;
+
+	if (start_line > line_count) return -1;
+	if (*name == '\0') {
+		strcpy(custom_status, "No filename specified to load");
+		return -1;
+	}
+	/* TODO: load the file */
+
+	fp = fopen(curfile, "rb");
+	if (!fp) return -2;
+
+	/* Read the file into the buffer line by line */
+	while (feof(fp) == 0) {
+		fgets(buf, CHUNK_SIZE, fp);
+		if (ferror(fp) != 0 || alloc_new_line(cur_line, buf, &line_count, &line_head) == NULL) {
+			fclose(fp);
+			return -3;
+		}
+		line_count++;
+	}
+
+	return line_count;
 }
 
 
@@ -978,9 +1019,10 @@ int do_cmd(char c)
 					if (cur_line > 1) {
 						do_cursor_up();
 						destroy_line(cur_line_s->next);
-						cur_line--;
 					} else {
 						destroy_line(cur_line_s);
+						crsr_x = 0; line_shift = 0;
+						crsr_restore();
 					}
 				} else {
 					cur_line_s = cur_line_s->next;
@@ -1107,21 +1149,30 @@ int main(int argc, char **argv)
 	sigaction(SIGWINCH, &act, NULL);
 #endif	/* NO_SIGNALS */
 
-	line_shift = 0;
+	/* Start an empty buffer or load a specified file */
+	cur_line = 1;
+	if (argc == 1) {
+		*curfile = '\0';
+		cur_line_s = alloc_new_line(line_count, NULL, &line_count, &line_head);
+	} else {
+		strncpy(curfile, argv[1], PATH_MAX);
+		if (i = load_file(curfile, 1) < 0) {
+			fprintf(stderr, "Cannot load '%s' (%d)\n", curfile, i);
+			exit(1);
+		}
+	}
+
+	/* Initialize the terminal */
 	if ((i = term_init()) != 0) {
-		if (i == -ENOTTY) fprintf(stderr, "tty is required\n");
+		if (i == -ENOTTY) fprintf(stderr, "a tty is required\n");
 		else fprintf(stderr, "cannot init terminal: %s\n", strerror(-i));
 		clean_abort();
 	}
-
 	read_term_dimensions();
 	CLEAR_SCREEN();
 
-	/* FIXME: For now, don't try to open a file */
-	*curfile = '\0';
-
 	/* Set up the testing line(s) */
-	cur_line_s = alloc_new_line(line_count, initial_line, &line_count, &line_head);
+/*	cur_line_s = alloc_new_line(line_count, initial_line, &line_count, &line_head);
 	if (!cur_line_s) {
 		fprintf(stderr, "Cannot create initial line\n");
 		clean_abort();
@@ -1129,11 +1180,12 @@ int main(int argc, char **argv)
 	if (!alloc_new_line(line_count, "test", &line_count, &line_head)) {
 		fprintf(stderr, "Cannot create second line\n");
 		clean_abort();
-	}
+	} */
 
-	crsr_x = 1; crsr_y = 1;
-	cur_line = 1;
+	/* Initialize the cursor position and draw the screen */
+	crsr_x = 1; crsr_y = 1; line_shift = 0;
 	redraw_screen();
+
 	/* Read commands forever */
 	while (read(STDIN_FILENO, &c, 1)) do_cmd(c);
 	clean_abort();
