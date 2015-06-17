@@ -139,16 +139,18 @@ static int line_count = 0;
 static char buf[CHUNK_SIZE];
 
 /* Escape sequence function definitions */
-#define CLEAR_SCREEN() write(STDOUT_FILENO, "\033[H\033[J", 6);
-#define ERASE_LINE() write(STDOUT_FILENO, "\033[2K", 4);
-#define ERASE_TO_EOL() write(STDOUT_FILENO, "\033[K", 3);
-#define CRSR_HOME() write(STDOUT_FILENO, "\033[H", 3);
-#define CRSR_UP() write(STDOUT_FILENO, "\033[1A", 4);
-#define CRSR_DOWN() write(STDOUT_FILENO, "\033[1B", 4);
-#define CRSR_LEFT() write(STDOUT_FILENO, "\033[1D", 4);
-#define CRSR_RIGHT() write(STDOUT_FILENO, "\033[1C", 4);
-#define DISABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7l", 4);
-#define ENABLE_LINE_WRAP() write(STDOUT_FILENO, "\033[7h", 4);
+#define CLEAR_SCREEN()	write(STDOUT_FILENO, "\033[H\033[J", 6);
+#define ERASE_LINE()	write(STDOUT_FILENO, "\033[2K", 4);
+#define ERASE_TO_EOL()	write(STDOUT_FILENO, "\033[K", 3);
+#define CRSR_HOME()	write(STDOUT_FILENO, "\033[H", 3);
+#define CRSR_UP()	write(STDOUT_FILENO, "\033[1A", 4);
+#define CRSR_DOWN()	write(STDOUT_FILENO, "\033[1B", 4);
+#define CRSR_LEFT()	write(STDOUT_FILENO, "\033[1D", 4);
+#define CRSR_RIGHT()	write(STDOUT_FILENO, "\033[1C", 4);
+#define SCROLL_UP()	crsr_yx(1,1); write(STDOUT_FILENO, "\033M", 2); crsr_restore();
+#define SCROLL_DOWN()	crsr_yx(term_real_rows,1); write(STDOUT_FILENO, "\033D", 2); crsr_restore();
+#define DISABLE_LINE_WRAP()	write(STDOUT_FILENO, "\033[7l", 4);
+#define ENABLE_LINE_WRAP() 	write(STDOUT_FILENO, "\033[7h", 4);
 
 
 /* Function prototypes */
@@ -186,12 +188,23 @@ void crsr_yx(int row, int col)
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
+static inline void set_scroll_area(void) {
+#ifdef __ELKS__
+	sprintf(crsr_set_string, "\033[%d;%dr", 1, term_rows);
+#else
+	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%dr", 1, term_rows);
+#endif
+	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
+}
+
 #ifndef NO_SIGNALS
 /* Window size change handler */
 void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 {
-	fprintf(stderr, "Got a WINCH\n");
+	//fprintf(stderr, "Got a WINCH\n");
 	read_term_dimensions();
+	set_scroll_area();
+	crsr_x = 1; crsr_y = 1; line_shift = 0;
 	redraw_screen();
 	return;
 }
@@ -239,8 +252,12 @@ static void redraw_line(struct line *line, int y)
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	write(STDOUT_FILENO, p, len);
-	if (crsr_y != term_cols) ERASE_TO_EOL();
-	write(STDOUT_FILENO, "\n", 1);
+	crsr_yx(crsr_y, len);
+	if (crsr_y < term_cols) ERASE_TO_EOL();
+	crsr_restore();
+	//write(STDOUT_FILENO, "\n", 1);
+	//fflush(stdout);
+	//sleep(1);
 	return;
 }
 
@@ -266,15 +283,17 @@ static void line_shift_increase(int count)
 }
 
 
-/* Walk the line list to the requested line */
+/* Walk the specified line list to the requested line */
 static inline struct line *walk_to_line(int num,
 		struct line *line)
 {
 	int i = 1;
 
-	if (num == 0) return NULL;
+	if (num == 0 || line == NULL) return NULL;
+
 	while (line != NULL) {
 		if (i == num) break;
+		if (line->next == NULL) return NULL;
 		line = line->next;
 		i++;
 	}
@@ -643,6 +662,8 @@ static int term_init(void)
 	/* Disable automatic line wrapping */
 	DISABLE_LINE_WRAP();
 
+	set_scroll_area();
+
 	return 0;
 }
 
@@ -847,7 +868,11 @@ static void do_cursor_up(void)
 	cur_line_s = cur_line_s->prev;
 	cur_line--;
 	if (crsr_y > 1) crsr_y--;
-	else redraw_screen();
+//	else redraw_screen();
+	else {
+		SCROLL_UP();
+		redraw_line(cur_line_s, crsr_y);
+	}
 	/* Pull the cursor to EOL if it is too far over */
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
@@ -868,7 +893,11 @@ static void do_cursor_down(void)
 	cur_line_s = cur_line_s->next;
 	cur_line++;
 	if (crsr_y < term_rows) crsr_y++;
-	else redraw_screen();
+//	else redraw_screen();
+	else {
+		SCROLL_DOWN();
+		redraw_line(cur_line_s, crsr_y);
+	}
 	/* Pull the cursor to EOL if it is too far over */
 	if ((crsr_x + line_shift) > cur_line_s->len) {
 		if (cur_line_s->len <= line_shift)
@@ -886,30 +915,55 @@ static void do_cursor_down(void)
 int load_file(const char * const restrict name, const int start_line)
 {
 	FILE *fp;
-	int line = start_line;
-	int line_count = 0;
+	struct line *cur_load_line;
+	int load_line_count = 0;
 
-	if (start_line > line_count) return -1;
-	if (*name == '\0') {
-		strcpy(custom_status, "No filename specified to load");
+	/* start_line = 0 will load at the beginning of the buffer */
+	if ((start_line != 0) && (start_line > line_count)) {
+//		printf("start_line %d, line_count %d, cur_line %d, name %s\n",
+//				start_line, line_count, cur_line, name);
 		return -1;
 	}
-	/* TODO: load the file */
-
-	fp = fopen(curfile, "rb");
-	if (!fp) return -2;
-
-	/* Read the file into the buffer line by line */
-	while (feof(fp) == 0) {
-		fgets(buf, CHUNK_SIZE, fp);
-		if (ferror(fp) != 0 || alloc_new_line(cur_line, buf, &line_count, &line_head) == NULL) {
-			fclose(fp);
-			return -3;
-		}
-		line_count++;
+	if (name[0] == '\0') {
+		strcpy(custom_status, "No filename specified to load");
+		return -2;
 	}
 
-	return line_count;
+	fp = fopen(curfile, "rb");
+	if (!fp) return -3;
+
+	cur_load_line = walk_to_line(start_line, line_head);
+	if (cur_load_line == NULL) cur_load_line = line_head;
+	/* Read the file into the buffer line by line */
+	while (feof(fp) == 0) {
+		//printf("entry: cll %p, lh %p, sl %d, linecnts %d,%d\n",cur_load_line,line_head,start_line,line_count,load_line_count);
+		buf[0] = '\0';
+		if (fgets(buf, CHUNK_SIZE, fp) == NULL) {
+			fclose(fp);
+			if (feof(fp) == 0) return -127;
+			break;
+		}
+		if (ferror(fp) != 0) {
+			fclose(fp);
+			return -4;
+		}
+
+		cur_load_line = alloc_new_line(0, buf, &line_count, &cur_load_line); // fast way
+		if (cur_load_line == NULL) {
+			fclose(fp);
+			return -5;
+		}
+		//printf("line %d len %d: %s", line_count, strlen(buf), buf);
+		if (line_head == NULL) {
+			line_head = cur_load_line;
+			line_head->prev = NULL;
+		}
+		load_line_count++;
+		//printf("loop : cll %p, lh %p, sl %d, linecnts %d,%d\n",cur_load_line,line_head,start_line,line_count,load_line_count);
+	}
+
+	//exit(0);
+	return load_line_count;
 }
 
 
@@ -1012,6 +1066,7 @@ int do_cmd(char c)
 	}
 
 	switch (command[cmd_len - 1]) {
+	case '#': SCROLL_DOWN(); break;
 	case 'd':
 		/* TODO: Replace with yank + delete in the movement section */
 		read(STDIN_FILENO, &c, 1);
@@ -1159,12 +1214,19 @@ int main(int argc, char **argv)
 	if (argc == 1) {
 		*curfile = '\0';
 		cur_line_s = alloc_new_line(line_count, NULL, &line_count, &line_head);
+		if (!cur_line_s) {
+			fprintf(stderr, "Cannot create initial line\n");
+			clean_abort();
+		}
 	} else {
 		strncpy(curfile, argv[1], PATH_MAX);
-		if (i = load_file(curfile, 1) < 0) {
-			fprintf(stderr, "Cannot load '%s' (%d)\n", curfile, i);
+		i = load_file(curfile, 0);
+		if (i < 0) {
+			fprintf(stderr, "Cannot load %s (error %d)\n", curfile, i);
 			exit(1);
 		}
+		cur_line_s = line_head;
+		sprintf(custom_status, "Read %d lines from '%s'", i, curfile);
 	}
 
 	/* Initialize the terminal */
