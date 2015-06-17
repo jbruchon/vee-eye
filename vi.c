@@ -547,12 +547,13 @@ static int do_del_under_crsr(int left)
 	char *p;
 
 	if (cur_line_s->len == 0) return 1;
+	if (crsr_x > (cur_line_s->len + line_shift) && left == 0) return 1;
 	p = cur_line_s->text + crsr_x + line_shift;
 
 	/* Copy everything down one char */
 	memmove(p - 1, p, strlen(p) + 1);
 	cur_line_s->len--;
-	if (crsr_x > (cur_line_s->len - line_shift + 1)) crsr_x--;
+	if (crsr_x > (cur_line_s->len - line_shift) + (vi_mode > 0 ? 1 : 0)) crsr_x--;
 	if (crsr_x < 1) {
 		if (line_shift > 0) line_shift_reduce(1);
 		crsr_x = 1;
@@ -714,7 +715,7 @@ void edit_mode(void)
 			if (crsr_x > 1) {
 				crsr_x--;
 				/* FIXME: Add joining of lines on backspace */
-				do_del_under_crsr(0);
+				do_del_under_crsr(1);
 			}
 			continue;
 
@@ -827,7 +828,10 @@ static void do_cursor_right(void)
 			return;
 		}
 	} else {
-		if (crsr_x <= (cur_line_s->len - line_shift)) {
+		/* Only move one space beyond end when in edit mode */
+		if ((crsr_x < (cur_line_s->len - line_shift)) ||
+		(crsr_x == (cur_line_s->len - line_shift)
+		 && vi_mode > 0) ) {
 			crsr_x++;
 			CRSR_RIGHT();
 		}
@@ -1035,6 +1039,7 @@ int do_cmd(char c)
 		break;
 	case 'a':	/* append insert */
 		/* Append is insert with the cursor moved right */
+		vi_mode = MODE_INSERT;
 		do_cursor_right();
 	case 'i':	/* insert */
 		vi_mode = MODE_INSERT;
