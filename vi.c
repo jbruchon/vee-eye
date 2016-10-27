@@ -1,6 +1,6 @@
 /*
  * vee-eye: Jody Bruchon's clone of 'vi'
- * Copyright (C) 2015 by Jody Bruchon <jody@jodybruchon.com>
+ * Copyright (C) 2015-2016 by Jody Bruchon <jody@jodybruchon.com>
  * Distributed under the MIT License (see LICENSE for details)
  *
  * This clone of 'vi' works with a doubly linked list of text lines.
@@ -157,7 +157,7 @@ static char buf[CHUNK_SIZE];
 static void read_term_dimensions(void);
 static void clean_abort(void);
 static void update_status(void);
-static void redraw_screen(void);
+static void redraw_screen(unsigned int row_start, unsigned int row_end);
 static void destroy_buffer(struct line **head);
 static void do_cursor_up(void);
 static void do_cursor_down(void);
@@ -166,6 +166,16 @@ static void do_cursor_right(void);
 
 
 /***************************************************************************/
+
+
+/* Oh dear God, NO! */
+static void oh_dear_god_no(char *string)
+{
+	strncpy(custom_status, "THIS SHOULDN'T HAPPEN: ", MAX_STATUS);
+	strncat(custom_status, string, MAX_STATUS);
+	update_status();
+	return;
+}
 
 
 /* Cursor control functions */
@@ -178,6 +188,7 @@ void crsr_restore(void)
 #endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
+
 void crsr_yx(int row, int col)
 {
 #ifdef __ELKS__
@@ -205,7 +216,7 @@ void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 	read_term_dimensions();
 	set_scroll_area();
 	crsr_x = 1; crsr_y = 1; line_shift = 0;
-	redraw_screen();
+	redraw_screen(0, 0);
 	return;
 }
 #endif	/* NO_SIGNALS */
@@ -241,33 +252,44 @@ static void invalid_command(void)
 /* Write a line to the screen with appropriate shift */
 static void redraw_line(struct line *line, int y)
 {
-	char *p = line->text + line_shift;
-	int len = line->len - line_shift;
+	char *p;
+	int len;
 
+	if (!line) goto error_line_null;
+	if (!line->text) goto error_text_null;
+	p = line->text + line_shift;
+	len = line->len - line_shift;
 #ifdef __ELKS__
 	sprintf(crsr_set_string, "\033[%d;1f", y);
 #else
 	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
 #endif
+	//ERASE_TO_EOL();
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
-	if (len > term_cols) len = term_cols;
-	write(STDOUT_FILENO, p, len);
-	crsr_yx(crsr_y, len);
-	if (crsr_y < term_cols) ERASE_TO_EOL();
+	if (len > term_cols - 1) len = term_cols - 1;
+	if (len > 0) write(STDOUT_FILENO, p, len);
+	crsr_yx(y, len + 1);
+	if (y < term_cols) ERASE_TO_EOL();
 	crsr_restore();
 	//write(STDOUT_FILENO, "\n", 1);
-	//fflush(stdout);
 	//sleep(1);
 	return;
+
+error_line_null:
+	fprintf(stderr, "error: redraw_line line is NULL\n");
+	clean_abort();
+error_text_null:
+	fprintf(stderr, "error: redraw_line line->text is NULL\n");
+	clean_abort();
 }
 
 
 /* Reduce line shift and redraw entire screen */
 static void line_shift_reduce(int count)
 {
-	if (count >= line_shift) line_shift = 0;
+	if (count == 0 || count >= line_shift) line_shift = 0;
 	else line_shift -= count;
-	//redraw_screen();
+	//redraw_screen(0, 0);
 	redraw_line(cur_line_s, crsr_y);
 	return;
 }
@@ -277,7 +299,7 @@ static void line_shift_reduce(int count)
 static void line_shift_increase(int count)
 {
 	line_shift += count;
-	//redraw_screen();
+	//redraw_screen(0, 0);
 	redraw_line(cur_line_s, crsr_y);
 	return;
 }
@@ -337,6 +359,8 @@ static struct line *alloc_new_line(int start,
 		new_line->next = prev_line->next;
 		new_line->prev = prev_line;
 		prev_line->next = new_line;
+		if (new_line->next != NULL)
+			new_line->next->prev = new_line;
 	}
 
 	/* If inserting between two lines, link the next one to us */
@@ -345,9 +369,8 @@ static struct line *alloc_new_line(int start,
 	/* Allocate the text area (if applicable) */
 	if (new_text == NULL) {
 		new_line->len = 0;
-		new_line->text = (char *)malloc(32);
+		new_line->text = (char *)calloc(1, 32);
 		if (!new_line->text) oom();
-		*(new_line->text) = '\0';
 		new_line->alloc_size = 32;
 	} else {
 		new_line->len = strlen(new_text);
@@ -434,7 +457,7 @@ static int destroy_line(struct line *target_line)
 		}
 	}
 
-	redraw_screen();
+	redraw_screen(0, 0);
 
 	return 0;
 
@@ -512,51 +535,66 @@ error_top_line:
 }
 
 
-/* Redraw the entire screen */
-static void redraw_screen(void)
+/* Redraw part or all of the screen */
+static void redraw_screen(unsigned int row_start, unsigned int row_end)
 {
 	struct line *line;
 	int start_y;
-	int remain_row;
+	int this_row;
 
-	CLEAR_SCREEN();
+	if (cur_line < crsr_y) goto error_line_cursor;
+	if (row_start > term_rows) goto error_row_params;
+
+	if (row_start == 0) row_start = 1;
+	if (row_end == 0) row_end = term_rows;
+
+	if (row_start == 1 && row_end == term_rows) CLEAR_SCREEN();
 
 	/* Get start line number and pointer */
-	if (cur_line < crsr_y) goto error_line_cursor;
-	start_y = cur_line + 1 - crsr_y;
+	start_y = cur_line - crsr_y + row_start;
 
 	/* Find the first line to write to the screen */
 	line = walk_to_line(start_y, line_head);
 	if (!line) goto error_line_walk;
+	fprintf(stderr, "line walk: start_y %d, line_head %p, line %p, line->next %p, re %u, rs %u\n",
+			start_y, line_head, line, line->next, row_end, row_start);
+//	clean_abort();
 
 	/* Draw lines until no more are left */
-	remain_row = term_rows;
-	while (remain_row) {
+	this_row = row_start;
+	while (this_row <= row_end) {
 		/* Write out this line data */
-		redraw_line(line, (term_rows - remain_row + 1));
-//		CRSR_DOWN();
-		remain_row--;
+		fprintf(stderr, "\nstart_y %d, redraw_line line %p, this_row %u, re %u, rs %u", start_y, line, this_row, row_end, row_start);
+		redraw_line(line, this_row);
+		this_row++;
+		crsr_yx(this_row, 1);
 		line = line->next;
 		if (line == NULL) break;
 	}
 
 	/* Fill the rest of the screen with tildes */
-	while (remain_row) {
+	while (this_row <= row_end) {
 		write(STDOUT_FILENO, "~\n", 2);
-		remain_row--;
+		this_row++;
 	}
 
 	update_status();
-	CRSR_HOME();
+	//CRSR_HOME();
+	crsr_restore();
 
 	return;
 
 error_line_cursor:
 	fprintf(stderr, "error: cur_line < crsr_y\n");
 	clean_abort();
+error_row_params:
+	fprintf(stderr, "error: bad row params: %u, %u\n",
+			row_start, row_end);
+	clean_abort();
 error_line_walk:
 	fprintf(stderr, "error: line walk invalid (%d) (%d - %d)\n",
 			start_y, cur_line, crsr_y);
+	clean_abort();
 }
 
 
@@ -585,14 +623,11 @@ static int do_del_under_crsr(int left)
 
 static void go_to_start_of_next_line(void)
 {
-	cur_line++;
-	cur_line_s = cur_line_s->next;
+	do_cursor_down();
 	line_shift = 0;
 	crsr_x = 1;
-	/* Handle scrolling */
-	if (crsr_y < term_rows) crsr_y++;
-	redraw_screen();
 	crsr_restore();
+	update_status();
 	return;
 }
 
@@ -677,16 +712,6 @@ static void clean_abort(void)
 }
 
 
-/* Oh dear God, NO! */
-static void oh_dear_god_no(char *string)
-{
-	strncpy(custom_status, "THIS SHOULDN'T HAPPEN: ", MAX_STATUS);
-	strncat(custom_status, string, MAX_STATUS);
-	update_status();
-	return;
-}
-
-
 void insert_char(char c)
 {
 	char *new_text;
@@ -707,7 +732,7 @@ void insert_char(char c)
 		*p = c;
 		if (crsr_x > term_cols) {
 			line_shift++;
-			redraw_screen();
+			redraw_line(cur_line_s, crsr_y);
 		} else crsr_x++;
 		cur_line_s->len++;
 		return;
@@ -746,7 +771,7 @@ void edit_mode(void)
 			sprintf(custom_status, "txt %p, adjtxt %p, ls+cx %d+%d",
 					cur_line_s->text, fragment, line_shift, crsr_x);
 
-			alloc_new_line(cur_line, fragment, &line_count, &line_head);
+			if (!alloc_new_line(cur_line, fragment, &line_count, &line_head)) oom();
 
 			/* New lines need to break the old line apart */
 			if (*fragment != '\0') {
@@ -754,6 +779,7 @@ void edit_mode(void)
 				*fragment = '\0';
 			}
 			go_to_start_of_next_line();
+			redraw_screen(crsr_y, 0);
 			continue;
 
 		case '\033':
@@ -778,6 +804,7 @@ void edit_mode(void)
 		insert_char(c);
 		redraw_line(cur_line_s, crsr_y);
 		crsr_restore();
+		update_status();
 	}
 
 end_edit_mode:
@@ -832,8 +859,8 @@ static void do_cursor_left(void)
 			redraw_line(cur_line_s, crsr_y);
 		}
 		return;
-	}
-	crsr_x--; CRSR_LEFT();
+	} else CRSR_LEFT();
+	crsr_x--;
 	return;
 }
 
@@ -851,8 +878,8 @@ static void do_cursor_right(void)
 	} else {
 		/* Only move one space beyond end when in edit mode */
 		if ((crsr_x < (cur_line_s->len - line_shift)) ||
-		(crsr_x == (cur_line_s->len - line_shift)
-		 && vi_mode > 0) ) {
+			(vi_mode > 0 &&
+			crsr_x == (cur_line_s->len - line_shift))) {
 			crsr_x++;
 			CRSR_RIGHT();
 		}
@@ -868,7 +895,7 @@ static void do_cursor_up(void)
 	cur_line_s = cur_line_s->prev;
 	cur_line--;
 	if (crsr_y > 1) crsr_y--;
-//	else redraw_screen();
+//	else redraw_screen(0, 0);
 	else {
 		SCROLL_UP();
 		redraw_line(cur_line_s, crsr_y);
@@ -879,7 +906,7 @@ static void do_cursor_up(void)
 			line_shift = cur_line_s->len - 1;
 		crsr_x = cur_line_s->len - line_shift;
 		if (crsr_x == 0) crsr_x = 1;
-		redraw_screen();
+		redraw_line(cur_line_s, crsr_y + 1);
 	}
 
 	return;
@@ -888,12 +915,17 @@ static void do_cursor_up(void)
 
 static void do_cursor_down(void)
 {
+	int temp_shift = line_shift;
+
+	line_shift = 0;
+	redraw_line(cur_line_s, crsr_y);
+	line_shift = temp_shift;
 	if (cur_line == line_count) return;
 	if (cur_line_s->next == NULL) return;
 	cur_line_s = cur_line_s->next;
 	cur_line++;
 	if (crsr_y < term_rows) crsr_y++;
-//	else redraw_screen();
+//	else redraw_screen(0, 0);
 	else {
 		SCROLL_DOWN();
 		redraw_line(cur_line_s, crsr_y);
@@ -904,7 +936,8 @@ static void do_cursor_down(void)
 			line_shift = cur_line_s->len - 1;
 		crsr_x = cur_line_s->len - line_shift;
 		if (crsr_x == 0) crsr_x = 1;
-		redraw_screen();
+		//redraw_screen(0, 0);
+		redraw_line(cur_line_s, crsr_y);
 	}
 
 	return;
@@ -917,6 +950,7 @@ int load_file(const char * const restrict name, const int start_line)
 	FILE *fp;
 	struct line *cur_load_line;
 	int load_line_count = 0;
+	int buflen;
 
 	/* start_line = 0 will load at the beginning of the buffer */
 	if ((start_line != 0) && (start_line > line_count)) {
@@ -948,6 +982,8 @@ int load_file(const char * const restrict name, const int start_line)
 			return -4;
 		}
 
+		buflen = strlen(buf) - 1;
+		if (buf[buflen] == '\n' || buf[buflen] == '\r') buf[buflen] = '\0';
 		cur_load_line = alloc_new_line(0, buf, &line_count, &cur_load_line); // fast way
 		if (cur_load_line == NULL) {
 			fclose(fp);
@@ -1114,7 +1150,7 @@ int do_cmd(char c)
 		do_cursor_right();
 		break;
 	case 'o':
-		cur_line_s = alloc_new_line(cur_line, NULL, &line_count, &line_head);
+		if(alloc_new_line(cur_line, NULL, &line_count, &line_head) == NULL) oom();
 		go_to_start_of_next_line();
 		break;
 	case 'x':	/* Delete char at cursor */
@@ -1133,7 +1169,7 @@ int do_cmd(char c)
 		break;
 #ifndef __ELKS__
 	case '!':	/* NON-STANDARD cursor pos dump */
-		redraw_screen();
+		redraw_screen(0, 0);
 		snprintf(custom_status, MAX_STATUS,
 				"%dx%d, cx %d, cy %d, ln %d of %d (len %d), clsalsz %d",
 				term_cols, term_real_rows, crsr_x, crsr_y,
@@ -1251,7 +1287,7 @@ int main(int argc, char **argv)
 
 	/* Initialize the cursor position and draw the screen */
 	crsr_x = 1; crsr_y = 1; line_shift = 0;
-	redraw_screen();
+	redraw_screen(0, 0);
 
 	/* Read commands forever */
 	while (read(STDIN_FILENO, &c, 1)) do_cmd(c);
