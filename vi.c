@@ -73,7 +73,7 @@ static const char initial_line[] = "Now is the time for all good men to come to 
  * and (crsr_x + line_shift) respectively (these are the cursor's current
  * (X,Y) coordinates in the whole file.)
  */
-static struct movement {
+static struct {
 	int start_line;
 	int start_char;
 	int dest_line;
@@ -157,7 +157,7 @@ static char buf[CHUNK_SIZE];
 static void read_term_dimensions(void);
 static void clean_abort(void);
 static void update_status(void);
-static void redraw_screen(unsigned int row_start, unsigned int row_end);
+static void redraw_screen(int row_start, int row_end);
 static void destroy_buffer(struct line **head);
 static void do_cursor_up(void);
 static void do_cursor_down(void);
@@ -216,7 +216,9 @@ void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 	read_term_dimensions();
 	set_scroll_area();
 	crsr_x = 1; crsr_y = 1; line_shift = 0;
+	crsr_restore();
 	redraw_screen(0, 0);
+	sprintf(custom_status, "Terminal resized to %dx%d", term_cols, term_rows);
 	return;
 }
 #endif	/* NO_SIGNALS */
@@ -527,7 +529,7 @@ error_top_line:
 
 
 /* Redraw part or all of the screen */
-static void redraw_screen(unsigned int row_start, unsigned int row_end)
+static void redraw_screen(int row_start, int row_end)
 {
 	struct line *line;
 	int start_y;
@@ -536,8 +538,8 @@ static void redraw_screen(unsigned int row_start, unsigned int row_end)
 	if (cur_line < crsr_y) goto error_line_cursor;
 	if (row_start > term_rows) goto error_row_params;
 
-	if (row_start == 0) row_start = 1;
-	if (row_end == 0) row_end = term_rows;
+	if (row_start <= 0) row_start = 1;
+	if (row_end <= 0) row_end = term_rows;
 
 	if (row_start == 1 && row_end == term_rows) CLEAR_SCREEN();
 
@@ -547,15 +549,14 @@ static void redraw_screen(unsigned int row_start, unsigned int row_end)
 	/* Find the first line to write to the screen */
 	line = walk_to_line(start_y, line_head);
 	if (!line) goto error_line_walk;
-	fprintf(stderr, "line walk: start_y %d, line_head %p, line %p, line->next %p, re %u, rs %u\n",
-			start_y, line_head, line, line->next, row_end, row_start);
+//	fprintf(stderr, "line walk: start_y %d, line_head %p, line %p, line->next %p, re %u, rs %u\n", start_y, line_head, line, line->next, row_end, row_start);
 //	clean_abort();
 
 	/* Draw lines until no more are left */
 	this_row = row_start;
 	while (this_row <= row_end) {
 		/* Write out this line data */
-		fprintf(stderr, "\nstart_y %d, redraw_line line %p, this_row %u, re %u, rs %u", start_y, line, this_row, row_end, row_start);
+//		fprintf(stderr, "\nstart_y %d, redraw_line line %p, this_row %u, re %u, rs %u", start_y, line, this_row, row_end, row_start);
 		redraw_line(line, this_row);
 		this_row++;
 		crsr_yx(this_row, 1);
@@ -1065,9 +1066,7 @@ int do_cmd(char c)
 
 	command[0] = c;
 
-	/* Clear any status that may already exist */
-	update_status();
-
+	//fprintf(stderr, "do_cmd: 0x%x\n", c);
 	while (c >= '0' && c <= '9') {
 		strncpy(custom_status, command, cmd_len);
 		update_status();
@@ -1076,12 +1075,15 @@ int do_cmd(char c)
 		if (cmd_len == MAX_CMDSIZE - 1) break;
 	}
 
+	/* User pressed ESC; cancel command */
+	if (c == '\033') goto end_cmd;
+	/* ignore other control codes */
+	if (c < 32 || c > 127) goto end_cmd;
+
 	command[cmd_len] = c; cmd_len++;
 	strncpy(custom_status, command, cmd_len);
 	update_status();
 
-	/* User pressed ESC; cancel command */
-	if (c == '\033') goto end_cmd;
 	if (cmd_len > 1) {
 		strncpy(custom_status, command, cmd_len);
 		update_status();
