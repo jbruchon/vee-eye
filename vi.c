@@ -201,9 +201,11 @@ static inline void set_scroll_area(void) {
 void sigwinch_handler(int signum, siginfo_t *sig, void *context)
 {
 	//fprintf(stderr, "Got a WINCH\n");
+	sleep(1);
 	read_term_dimensions();
 	set_scroll_area();
-	crsr_x = 1; crsr_y = 1; line_shift = 0;
+	if (crsr_x >= term_cols) crsr_x = term_cols - 1;
+	if (crsr_y >= term_rows) crsr_y = term_rows - 1;
 	crsr_restore();
 	redraw_screen(0, 0);
 	sprintf(custom_status, "Terminal resized to %dx%d", term_cols, term_rows);
@@ -243,7 +245,7 @@ static void redraw_line(struct line *line, int y)
 	sprintf(crsr_set_string, "\033[%d;1f", y);
 	ERASE_TO_EOL();
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
-	if (len > term_cols - 1) len = term_cols - 1;
+	if (len > term_cols) len = term_cols;
 	if (len > 0) write(STDOUT_FILENO, p, len);
 	crsr_yx(y, len + 1);
 	if (y < term_cols) ERASE_TO_EOL();
@@ -266,8 +268,8 @@ static inline void line_shift_reduce(int count)
 {
 	if (count == 0 || count >= line_shift) line_shift = 0;
 	else line_shift -= count;
-	redraw_screen(0, 0);
-	//redraw_line(cur_line_s, crsr_y);
+	//redraw_screen(0, 0);
+	redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
@@ -276,8 +278,8 @@ static inline void line_shift_reduce(int count)
 static inline void line_shift_increase(int count)
 {
 	line_shift += count;
-	redraw_screen(0, 0);
-	//redraw_line(cur_line_s, crsr_y);
+	//redraw_screen(0, 0);
+	redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
@@ -836,7 +838,7 @@ static void do_cursor_right(void)
 {
 	if (crsr_x > cur_line_s->len) return;
 	if (crsr_x == term_cols) {
-		if ((cur_line_s->len - line_shift) > term_cols) {
+		if ((cur_line_s->len - line_shift) >= term_cols) {
 			line_shift_increase(1);
 			redraw_line(cur_line_s, crsr_y);
 		} else {
