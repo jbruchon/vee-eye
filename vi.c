@@ -243,12 +243,12 @@ static void redraw_line(struct line *line, int y)
 	p = line->text + line_shift;
 	len = line->len - line_shift;
 	sprintf(crsr_set_string, "\033[%d;1f", y);
-	ERASE_TO_EOL();
+	//ERASE_TO_EOL();
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols) len = term_cols;
 	if (len > 0) write(STDOUT_FILENO, p, len);
 	crsr_yx(y, len + 1);
-	if (y < term_cols) ERASE_TO_EOL();
+	if (len < term_cols) ERASE_TO_EOL();
 	crsr_restore();
 	//write(STDOUT_FILENO, "\n", 1);
 	//sleep(1);
@@ -836,7 +836,7 @@ static void do_cursor_right(void)
 {
 	if (crsr_x > cur_line_s->len) return;
 	if (crsr_x == term_cols) {
-		if ((cur_line_s->len - line_shift) >= term_cols) {
+		if ((cur_line_s->len - line_shift) > term_cols) {
 			line_shift_increase(1);
 			redraw_line(cur_line_s, crsr_y);
 		} else {
@@ -858,6 +858,11 @@ static void do_cursor_right(void)
 
 static void do_cursor_up(void)
 {
+	int temp_shift = line_shift;
+
+	line_shift = 0;
+	redraw_line(cur_line_s, crsr_y);
+	line_shift = temp_shift;
 	if (cur_line == 1) return;
 	if (cur_line_s->prev == NULL) return;
 	cur_line_s = cur_line_s->prev;
@@ -866,16 +871,11 @@ static void do_cursor_up(void)
 //	else redraw_screen(0, 0);
 	else {
 		SCROLL_UP();
-		redraw_line(cur_line_s, crsr_y);
 	}
 	/* Pull the cursor to EOL if it is too far over */
-	if ((crsr_x + line_shift) > cur_line_s->len) {
-		if (cur_line_s->len <= line_shift)
-			line_shift = cur_line_s->len - 1;
-		crsr_x = cur_line_s->len - line_shift;
-		if (crsr_x == 0) crsr_x = 1;
-		redraw_line(cur_line_s, crsr_y + 1);
-	}
+	if (crsr_x > cur_line_s->len) crsr_x = cur_line_s->len;
+	line_shift = 0;
+	redraw_line(cur_line_s, crsr_y);
 
 	return;
 }
@@ -975,10 +975,24 @@ int load_file(const char * const restrict name, const int start_line)
 int save_file(const char * const restrict name)
 {
 	FILE *fp;
+	struct line *line = line_head;
+	const char line_end[] = "\n";
 
 	if (!name || *name == '\0') return -1;
 	/* TODO: save the file */
-	return -1;
+	fp = fopen(name, "w+b");
+	if (!fp) return -1;
+	while (line) {
+		errno = 0;
+		fwrite(line->text, line->len, 1, fp);
+		if (ferror(fp)) break;
+		fwrite(&line_end, 1, 1, fp);
+		if (ferror(fp)) break;
+		line = line->next;
+	}
+	fclose(fp);
+	if (errno != 0) return -1;
+	return 0;
 }
 
 
@@ -1115,6 +1129,10 @@ int do_cmd(char c)
 	case 'o':
 		if(alloc_new_line(cur_line, NULL, &line_count, &line_head) == NULL) oom();
 		go_to_start_of_next_line();
+		redraw_screen(crsr_y, 0);
+		vi_mode = MODE_INSERT;
+		update_status();
+		edit_mode();
 		break;
 	case 'x':	/* Delete char at cursor */
 		i = num_times;
