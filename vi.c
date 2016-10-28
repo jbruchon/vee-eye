@@ -976,7 +976,6 @@ int save_file(const char * const restrict name)
 {
 	FILE *fp;
 	struct line *line = line_head;
-	const char line_end[] = "\n";
 
 	if (!name || *name == '\0') return -1;
 	/* TODO: save the file */
@@ -986,7 +985,7 @@ int save_file(const char * const restrict name)
 		errno = 0;
 		fwrite(line->text, line->len, 1, fp);
 		if (ferror(fp)) break;
-		fwrite(&line_end, 1, 1, fp);
+		fwrite("\n", 1, 1, fp);
 		if (ferror(fp)) break;
 		line = line->next;
 	}
