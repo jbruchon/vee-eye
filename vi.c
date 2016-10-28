@@ -704,10 +704,8 @@ void insert_char(char c)
 		p = cur_line_s->text + crsr_x + line_shift - 1;
 		memmove(p + 1, p, strlen(p) + 1);
 		*p = c;
-		if (crsr_x > term_cols) {
-			line_shift++;
-			redraw_line(cur_line_s, crsr_y);
-		} else crsr_x++;
+		if (crsr_x > term_cols) line_shift_increase(1);
+		else crsr_x++;
 		cur_line_s->len++;
 		return;
 
