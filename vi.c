@@ -181,30 +181,18 @@ static void oh_dear_god_no(char *string)
 /* Cursor control functions */
 void crsr_restore(void)
 {
-#ifdef __ELKS__
 	sprintf(crsr_set_string, "\033[%d;%df", crsr_y, crsr_x);
-#else
-	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", crsr_y, crsr_x);
-#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
 void crsr_yx(int row, int col)
 {
-#ifdef __ELKS__
 	sprintf(crsr_set_string, "\033[%d;%df", row, col);
-#else
-	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%df", row, col);
-#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
 static inline void set_scroll_area(void) {
-#ifdef __ELKS__
 	sprintf(crsr_set_string, "\033[%d;%dr", 1, term_rows);
-#else
-	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;%dr", 1, term_rows);
-#endif
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 }
 
@@ -252,11 +240,7 @@ static void redraw_line(struct line *line, int y)
 	if (!line->text) goto error_text_null;
 	p = line->text + line_shift;
 	len = line->len - line_shift;
-#ifdef __ELKS__
 	sprintf(crsr_set_string, "\033[%d;1f", y);
-#else
-	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
-#endif
 	ERASE_TO_EOL();
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols - 1) len = term_cols - 1;
@@ -508,11 +492,7 @@ static void update_status(void)
 	} else if ((cur_line + term_rows) >= line_count) {
 		write(STDOUT_FILENO, " Bot", 4);
 	} else {
-#ifdef __ELKS__
 		sprintf(num, "%d%%", (line_count * 100) / top_line);
-#else
-		snprintf(num, 4, "%d%%", (line_count * 100) / top_line);
-#endif
 		write(STDOUT_FILENO, num, strlen(num));
 	}
 
@@ -784,11 +764,7 @@ void edit_mode(void)
 
 		/* Catch any invalid characters */
 		if (c < 32 || c > 127) {
-#ifdef __ELKS__
 			sprintf(custom_status, "Invalid char entered: %u", c);
-#else
-			snprintf(custom_status, MAX_STATUS, "Invalid char entered: %u", c);
-#endif
 			update_status();
 			continue;
 		}
@@ -1000,12 +976,9 @@ int save_file(const char * const restrict name)
 {
 	FILE *fp;
 
-	if (!name || *name == '\0') {
-		strcpy(custom_status, "Cannot write: no file name given");
-		return -1;
-	}
+	if (!name || *name == '\0') return -1;
 	/* TODO: save the file */
-	return 0;
+	return -1;
 }
 
 
@@ -1081,9 +1054,6 @@ int do_cmd(char c)
 	if (c < 32 || c > 127) goto end_cmd;
 
 	command[cmd_len] = c; cmd_len++;
-	strncpy(custom_status, command, cmd_len);
-	update_status();
-
 	if (cmd_len > 1) {
 		strncpy(custom_status, command, cmd_len);
 		update_status();
@@ -1175,23 +1145,30 @@ int do_cmd(char c)
 		crsr_yx(term_real_rows, 1);
 		ERASE_LINE();
 		write(STDOUT_FILENO, ":", 1);
-		if (!get_command_string(command)) break;
-		if (strcmp(command, "wq") == 0) {
+		cmd_len = get_command_string(command);
+		if (!cmd_len) break;
+		if (strncmp(command, "wq", 2) == 0) {
 			/* Save to current file */
-			if (*curfile != '\0') {
-				save_file(curfile);
-				goto end_vi;
-			} else {
-			/* TODO: actually save the buffer */
-				strcpy(custom_status, "Can't save. Type :w name_of_file instead.");
+			if (cmd_len == 2 && *curfile != '\0') {
+				if (save_file(curfile) == 0) goto end_vi;
+				else goto end_cmd;
+			} else if (cmd_len < 4) {
+				strcpy(custom_status, "Cannot save: no file name specified");
 				goto end_cmd;
+			} else {
+				if (save_file(curfile) == 0) goto end_vi;
+				else goto end_cmd;
 			}
 		}
-		if (strncmp(command, "w ", 2) == 0) {
+		if (*command == 'w') {
 			/* Save the file specified */
 			savefile = command + 2;
-			if (*savefile == '\0') save_file(curfile);
-			else save_file(savefile);
+			i = 0;
+			if (cmd_len < 4 || *savefile == '\0') {
+				if (*curfile != 0) i = save_file(curfile);
+				else sprintf(custom_status, "Cannot save: no file name specified");
+			} else i = save_file(savefile);
+			if (i) sprintf(custom_status, "Error while saving file");
 			goto end_cmd;
 		}
 		if (strcmp(command, "q") == 0) goto end_vi;
@@ -1199,11 +1176,7 @@ int do_cmd(char c)
 		break;
 
 	default:
-#ifdef __ELKS__
 		sprintf(custom_status, "Unknown key %u", c);
-#else
-		snprintf(custom_status, MAX_STATUS, "Unknown key %u", c);
-#endif
 		break;
 	}
 
@@ -1252,7 +1225,7 @@ int main(int argc, char **argv)
 		i = load_file(curfile, 0);
 		if (i < 0) {
 			fprintf(stderr, "Cannot load %s (error %d)\n", curfile, i);
-			exit(1);
+			exit(EXIT_FAILURE);
 		}
 		cur_line_s = line_head;
 		sprintf(custom_status, "Read %d lines from '%s'", i, curfile);
@@ -1266,17 +1239,6 @@ int main(int argc, char **argv)
 	}
 	read_term_dimensions();
 	CLEAR_SCREEN();
-
-	/* Set up the testing line(s) */
-/*	cur_line_s = alloc_new_line(line_count, initial_line, &line_count, &line_head);
-	if (!cur_line_s) {
-		fprintf(stderr, "Cannot create initial line\n");
-		clean_abort();
-	}
-	if (!alloc_new_line(line_count, "test", &line_count, &line_head)) {
-		fprintf(stderr, "Cannot create second line\n");
-		clean_abort();
-	} */
 
 	/* Initialize the cursor position and draw the screen */
 	crsr_x = 1; crsr_y = 1; line_shift = 0;
