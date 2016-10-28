@@ -240,15 +240,6 @@ static void read_term_dimensions(void)
 }
 
 
-/* Invalid command warning */
-static void invalid_command(void)
-{
-	strncpy(custom_status, "Invalid command", MAX_STATUS);
-	update_status();
-	return;
-}
-
-
 /* Write a line to the screen with appropriate shift */
 static void redraw_line(struct line *line, int y)
 {
