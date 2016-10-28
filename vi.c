@@ -257,7 +257,7 @@ static void redraw_line(struct line *line, int y)
 #else
 	snprintf(crsr_set_string, MAX_CRSR_SETSTRING, "\033[%d;1f", y);
 #endif
-	//ERASE_TO_EOL();
+	ERASE_TO_EOL();
 	write(STDOUT_FILENO, crsr_set_string, strlen(crsr_set_string));
 	if (len > term_cols - 1) len = term_cols - 1;
 	if (len > 0) write(STDOUT_FILENO, p, len);
@@ -278,22 +278,22 @@ error_text_null:
 
 
 /* Reduce line shift and redraw entire screen */
-static void line_shift_reduce(int count)
+static inline void line_shift_reduce(int count)
 {
 	if (count == 0 || count >= line_shift) line_shift = 0;
 	else line_shift -= count;
-	//redraw_screen(0, 0);
-	redraw_line(cur_line_s, crsr_y);
+	redraw_screen(0, 0);
+	//redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
 
 /* Increase line shift and redraw entire screen */
-static void line_shift_increase(int count)
+static inline void line_shift_increase(int count)
 {
 	line_shift += count;
-	//redraw_screen(0, 0);
-	redraw_line(cur_line_s, crsr_y);
+	redraw_screen(0, 0);
+	//redraw_line(cur_line_s, crsr_y);
 	return;
 }
 
@@ -570,7 +570,7 @@ static void redraw_screen(int row_start, int row_end)
 		this_row++;
 	}
 
-	update_status();
+	//update_status();
 	//CRSR_HOME();
 	crsr_restore();
 
@@ -1000,7 +1000,7 @@ int save_file(const char * const restrict name)
 {
 	FILE *fp;
 
-	if (*name == '\0') {
+	if (!name || *name == '\0') {
 		strcpy(custom_status, "Cannot write: no file name given");
 		return -1;
 	}
