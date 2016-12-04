@@ -41,9 +41,6 @@
  #include <stdint.h>
 #endif	/* __ELKS__ */
 
-/* FIXME: This is only for testing purposes. */
-static const char initial_line[] = "Now is the time for all good men to come to the aid of the party. Lorem Ipsum is a stupid Microsoft thing. BLAH BLAH BLAH!";
-
 
 /* The current movement command parameters (cursor-relative)
  * Movement is stored as either a destination line/char or a count of
@@ -740,8 +737,8 @@ void edit_mode(void)
 		case '\n':
 		case '\r':	/* New line */
 			fragment = cur_line_s->text + line_shift + crsr_x - 1;
-			sprintf(custom_status, "txt %p, adjtxt %p, ls+cx %d+%d",
-					cur_line_s->text, fragment, line_shift, crsr_x);
+//			sprintf(custom_status, "txt %p, adjtxt %p, ls+cx %d+%d",
+//					cur_line_s->text, fragment, line_shift, crsr_x);
 
 			if (!alloc_new_line(cur_line, fragment, &line_count, &line_head)) oom();
 
@@ -1050,11 +1047,11 @@ int do_cmd(char c)
 	int num_times = 1;
 	int i;
 
-	command[0] = c;
+	command[0] = c; cmd_len++;
 
 	//fprintf(stderr, "do_cmd: 0x%x\n", c);
 	while (c >= '0' && c <= '9') {
-		strncpy(custom_status, command, cmd_len);
+		strncpy(custom_status, command, cmd_len + 1);
 		update_status();
 		read(STDIN_FILENO, &c, 1);
 		command[cmd_len] = c; cmd_len++;
@@ -1132,6 +1129,9 @@ int do_cmd(char c)
 		vi_mode = MODE_INSERT;
 		update_status();
 		edit_mode();
+		break;
+	case 'p':
+		sprintf(custom_status, "'put' command not yet supported");
 		break;
 	case 'x':	/* Delete char at cursor */
 		i = num_times;
@@ -1240,12 +1240,21 @@ int main(int argc, char **argv)
 	} else {
 		strncpy(curfile, argv[1], PATH_MAX);
 		i = load_file(curfile, 0);
-		if (i < 0) {
-			fprintf(stderr, "Cannot load %s (error %d)\n", curfile, i);
-			exit(EXIT_FAILURE);
+		if (i == -3) {
+			cur_line_s = alloc_new_line(line_count, NULL, &line_count, &line_head);
+			if (!cur_line_s) {
+				fprintf(stderr, "Cannot create initial line\n");
+				clean_abort();
+			}
+			sprintf(custom_status, "'%s' [NEW FILE]", curfile);
+		} else {
+			if (i < 0) {
+				fprintf(stderr, "Cannot load %s (error %d)\n", curfile, i);
+				exit(EXIT_FAILURE);
+			}
+			cur_line_s = line_head;
+			sprintf(custom_status, "Read %d lines from '%s'", i, curfile);
 		}
-		cur_line_s = line_head;
-		sprintf(custom_status, "Read %d lines from '%s'", i, curfile);
 	}
 
 	/* Initialize the terminal */
@@ -1260,6 +1269,7 @@ int main(int argc, char **argv)
 	/* Initialize the cursor position and draw the screen */
 	crsr_x = 1; crsr_y = 1; line_shift = 0;
 	redraw_screen(0, 0);
+	update_status();
 
 	/* Read commands forever */
 	while (read(STDIN_FILENO, &c, 1)) do_cmd(c);
