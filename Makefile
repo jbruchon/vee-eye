@@ -1,7 +1,7 @@
 CC=gcc
 ELKS_CC=bcc
-#CFLAGS=-O2 -g
-CFLAGS=-Og -g3
+CFLAGS=-O2 -g
+#CFLAGS=-Og -g3
 ELKS_CFLAGS=-ansi -0 -O -s -DNO_SIGNALS
 BUILD_CFLAGS = -std=gnu99 -I. -D_FILE_OFFSET_BITS=64 -pipe -fstrict-aliasing
 BUILD_CFLAGS += -Wall -Wextra -Wcast-align -Wstrict-aliasing -pedantic -Wstrict-overflow -Wno-unused-parameter
