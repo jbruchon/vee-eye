@@ -1,6 +1,6 @@
 /*
  * vee-eye: Jody Bruchon's clone of 'vi'
- * Copyright (C) 2015-2016 by Jody Bruchon <jody@jodybruchon.com>
+ * Copyright (C) 2015-2020 by Jody Bruchon <jody@jodybruchon.com>
  * Distributed under the MIT License (see LICENSE for details)
  *
  * This clone of 'vi' works with a doubly linked list of text lines.
