@@ -939,7 +939,6 @@ int load_file(const char * const restrict name, const int start_line)
 		buf[0] = '\0';
 		if (fgets(buf, CHUNK_SIZE, fp) == NULL) {
 			fclose(fp);
-			if (feof(fp) == 0) return -127;
 			break;
 		}
 		if (ferror(fp) != 0) {
