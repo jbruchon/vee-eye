@@ -1086,10 +1086,12 @@ int do_cmd(char c)
 					if (cur_line > 1) {
 						do_cursor_up();
 						destroy_line(cur_line_s->next);
+						break;
 					} else {
 						destroy_line(cur_line_s);
 						crsr_x = 0; line_shift = 0;
 						crsr_restore();
+						break;
 					}
 				} else {
 					cur_line_s = cur_line_s->next;
